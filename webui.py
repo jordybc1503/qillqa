@@ -25,7 +25,7 @@ from pathlib import Path
 import markdown
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 import embedder
 from server import MODEL, PAGES, TOKEN, VAR, _index, _rel, _safe, _title, read_page, tree
@@ -209,7 +209,7 @@ def _authed(req: Request) -> bool:
 
 @app.middleware("http")
 async def gate(req: Request, call_next):
-    if req.url.path in ("/health", "/login") or _authed(req):
+    if req.url.path in ("/health", "/login") or req.url.path.startswith("/f/") or _authed(req):
         return await call_next(req)
     if req.url.path.startswith(("/api/", "/view")):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -277,26 +277,82 @@ def api_search(q: str = "", limit: int = 10):
     return search(q, max(1, min(limit, 50)))
 
 
+# ---------------------------------------------------------------- archivos
+# Cada página se sirve bajo /f/<firma>/<carpeta>/ : las rutas relativas del md
+# o html (fotos, vídeos, .css, .js, PDFs) funcionan sin cookie, porque la página
+# corre aislada (origen opaco). La firma solo abre esa carpeta y sus subpáginas.
+# ponytail: firmas sin caducidad; añadirla si algún día se expone a internet.
+
+def _sig(rel: str) -> str:
+    return hmac.new(TOKEN.encode(), b"f:" + rel.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def signed_url(rel: str) -> str:
+    return f"/f/{_sig(rel)}/" + "".join(urllib.parse.quote(seg) + "/" for seg in rel.split("/"))
+
+
+_HTML_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals"
+_MD_SANDBOX = "sandbox allow-popups allow-popups-to-escape-sandbox"
+_SAFE_HEADERS = {"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
+_VIDEO = r"mp4|webm|mov|m4v"
+_AUDIO = r"mp3|wav|m4a|ogg|flac|opus"
+
+
+def _render_md(title: str, text: str) -> str:
+    body = markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
+    # ![x](clip.mp4) → reproductor de vídeo / audio
+    body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_VIDEO}))"\s*/?>',
+                  r'<video controls preload="metadata" src="\2" title="\1"></video>', body, flags=re.I)
+    body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_AUDIO}))"\s*/?>',
+                  r'<audio controls preload="metadata" src="\2" title="\1"></audio>', body, flags=re.I)
+    return _shell(title, f'<base target="_blank"><article>{body}</article>')
+
+
 @app.get("/view")
 def view(path: str = ""):
-    """La página tal cual, siempre aislada: CSP sandbox = origen opaco, sin cookie ni API."""
+    """Abre la página (requiere sesión) en su URL firmada."""
     try:
-        idx = _index(_safe(path))
+        d = _safe(path)
     except ValueError as e:
         _bad(e)
-    if not idx:
+    if d == PAGES or not _index(d):
         _bad(ValueError(f"no hay página en {path!r}"))
-    text = idx.read_text(errors="replace")
-    if idx.suffix == ".html":
-        sandbox = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals"
-        body = text
-    else:
-        sandbox = "sandbox allow-popups allow-popups-to-escape-sandbox"
-        body = _shell(_title(idx.parent), '<base target="_blank"><article>'
-                      + markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
-                      + "</article>")
-    return Response(body, media_type="text/html; charset=utf-8",
-                    headers={"Content-Security-Policy": sandbox, "Cache-Control": "no-store"})
+    return RedirectResponse(signed_url(_rel(d)), status_code=303)
+
+
+@app.get("/f/{sig}/{rest:path}")
+def signed_file(sig: str, rest: str, req: Request):
+    parts = [p for p in rest.split("/") if p]
+    if not parts or any(p == ".." or p.startswith(".") for p in parts):
+        _bad(ValueError("ruta no válida"))
+    # carpeta firmada = el prefijo más largo cuya firma coincide (nunca la raíz)
+    scope = next((PAGES.joinpath(*parts[:n]) for n in range(len(parts), 0, -1)
+                  if hmac.compare_digest(sig, _sig("/".join(parts[:n])))), None)
+    try:
+        target = _safe(rest)
+    except ValueError as e:
+        _bad(e)
+    if scope is None or (target != scope.resolve() and scope.resolve() not in target.parents):
+        _bad(ValueError("firma no válida"))
+    if target.is_dir():
+        if not req.url.path.endswith("/"):  # las rutas relativas necesitan la barra final
+            return RedirectResponse(req.url.path + "/", status_code=307)
+        idx = _index(target)
+        if not idx:
+            _bad(ValueError("no hay página aquí"))
+        text = idx.read_text(errors="replace")
+        html_page = idx.suffix == ".html"
+        return Response(text if html_page else _render_md(_title(target), text),
+                        media_type="text/html; charset=utf-8",
+                        headers={**_SAFE_HEADERS, "Cache-Control": "no-store",
+                                 "Content-Security-Policy": _HTML_SANDBOX if html_page else _MD_SANDBOX})
+    if not target.is_file():
+        _bad(ValueError("no existe"))
+    r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private"})
+    if r.media_type != "application/pdf":  # Chrome no renderiza PDFs en sandbox
+        r.headers["Content-Security-Policy"] = (_HTML_SANDBOX if r.media_type.startswith("text/html")
+                                                 else "sandbox")
+    return r
 
 
 CSS = """

@@ -91,7 +91,34 @@ def read_page(path: str) -> dict:
         raise ValueError(f"no hay página en {path!r}")
     return {"path": _rel(d), "title": _title(d), "format": idx.suffix[1:],
             "content": idx.read_text(errors="replace"),
-            "children": [_rel(c) for c in _children(d)], "url": f"{URL}/#{_rel(d)}"}
+            "children": [_rel(c) for c in _children(d)], "files": _files(d),
+            "url": f"{URL}/#{_rel(d)}"}
+
+
+def _files(d: Path) -> list[str]:
+    return sorted(f.name for f in d.iterdir()
+                  if f.is_file() and f.name not in INDEX_NAMES and not f.name.startswith("."))
+
+
+_MEDIA = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif",
+          ".mp4", ".webm", ".mov", ".m4v", ".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+
+
+def attach(path: str, source: str, name: str = "") -> dict:
+    """Copia un archivo local a la carpeta de la página."""
+    d = _safe(path)
+    if d == PAGES or not d.is_dir():
+        raise ValueError(f"no existe la página {path!r}; créala primero")
+    src = Path(os.path.expanduser(source))
+    if not src.is_file():
+        raise ValueError(f"no existe el archivo {source!r}")
+    name = name or src.name
+    if "/" in name or "\\" in name or name.startswith(".") or name in INDEX_NAMES:
+        raise ValueError(f"nombre de archivo no válido: {name!r}")
+    shutil.copyfile(src, d / name)
+    ref = urllib.parse.quote(name)
+    md = f"![{name}]({ref})" if Path(name).suffix.lower() in _MEDIA else f"[{name}]({ref})"
+    return {"page": _rel(d), "file": name, "markdown": md}
 
 
 def write_page(path: str, content: str, fmt: str, create: bool) -> dict:
@@ -225,8 +252,11 @@ def create_page(path: str, content: str, format: str = "md") -> str:
     informes, resúmenes de llamadas y notas de proyectos que quieras conservar
     y buscar después (en lugar de un Artifact). `path` es jerárquico con '/',
     p.ej. 'trez/edwin/llamada-2026-10-21'; cada nivel es una página que puede
-    tener subpáginas. `format`: 'md' (por defecto) o 'html' (página
-    autocontenida, tipo artifact; sin recursos locales). Devuelve la URL web."""
+    tener subpáginas. `format`: 'md' (por defecto) o 'html' (página tipo
+    artifact con su CSS/JS). Fotos, vídeos, PDFs, .css/.js y demás archivos
+    se añaden con attach_file y se referencian con ruta relativa:
+    ![foto](foto.jpg), ![demo](clip.mp4) (vídeo/audio se reproducen),
+    [informe](informe.pdf), <link href="estilo.css">. Devuelve la URL web."""
     return _write(write_page, path, content, format, create=True)
 
 
@@ -240,6 +270,15 @@ def update_page(path: str, content: str, format: str = "md") -> str:
 def get_page(path: str) -> str:
     """Lee una página de qillqa: título, formato, contenido y subpáginas."""
     return _dump(read_page, path)
+
+
+@mcp.tool()
+def attach_file(path: str, source: str, name: str = "") -> str:
+    """Adjunta un archivo local (foto, vídeo, audio, PDF, .css, .js, lo que sea)
+    a la página `path` de qillqa, copiándolo a su carpeta. `source` es la ruta
+    del archivo en este equipo; `name` (opcional) es el nombre destino.
+    Devuelve el Markdown para insertarlo en la página con update_page."""
+    return _dump(attach, path, source, name)
 
 
 @mcp.tool()

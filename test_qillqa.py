@@ -112,4 +112,41 @@ assert v.headers["content-security-policy"].startswith("sandbox"), v.headers
 assert c.get("/view?path=../outside").status_code == 404
 assert c.get("/api/search?q=lomo").json()[0]["path"] == "cocina"
 
+# adjuntos y archivos firmados
+server.write_page("proyecto x", "# Proyecto\n\n![foto](foto.png)\n\n![clip](clip.mp4)\n\n[doc](doc.pdf)", "md", True)
+src = tmp / "src"
+src.mkdir()
+for n, data in {"foto.png": b"\x89PNG fake", "clip.mp4": b"0123456789", "doc.pdf": b"%PDF-1.4",
+                "dibujo.svg": b"<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>"}.items():
+    (src / n).write_bytes(data)
+    server.attach("proyecto x", str(src / n))
+for bad in ("index.md", ".oculto", "a/b", "../x"):
+    try:
+        server.attach("proyecto x", str(src / "foto.png"), bad)
+        raise AssertionError(f"attach aceptó el nombre {bad!r}")
+    except ValueError:
+        pass
+assert server.read_page("proyecto x")["files"] == ["clip.mp4", "dibujo.svg", "doc.pdf", "foto.png"]
+r = c.get("/view?path=proyecto x", follow_redirects=False)
+base = r.headers["location"]
+assert r.status_code == 303 and base.startswith("/f/") and base.endswith("/proyecto%20x/"), base
+anon = TestClient(webui.app)  # sin cookie: la firma basta
+page = anon.get(base)
+assert page.status_code == 200 and page.headers["content-security-policy"].startswith("sandbox")
+assert page.headers["referrer-policy"] == "no-referrer"
+assert '<img alt="foto" src="foto.png"' in page.text and '<video controls' in page.text, page.text
+assert anon.get(base + "foto.png").headers["content-type"] == "image/png"
+assert anon.get(base + "dibujo.svg").headers["content-security-policy"] == "sandbox"
+assert "content-security-policy" not in anon.get(base + "doc.pdf").headers
+assert anon.get(base + "clip.mp4", headers={"Range": "bytes=0-3"}).status_code == 206
+sig = base.split("/")[2]
+assert anon.get(f"/f/{'0' * 32}/proyecto%20x/foto.png").status_code == 404, "firma falsa"
+assert anon.get(f"/f/{sig}/cocina/").status_code == 404, "firma de otra página"
+assert anon.get(f"/f/{sig}/proyecto%20x/%2e%2e/cocina/").status_code == 404, ".. dentro de /f"
+server.write_page("pa/b", "# b", "md", True)
+server.write_page("pa/bc", "# bc", "md", True)
+assert anon.get(f"/f/{webui._sig('pa/b')}/pa/bc/").status_code == 404, "prefijo de texto pa/b → pa/bc"
+assert anon.get(f"/f/{webui._sig('')}/cocina/").status_code == 404, "firma de la raíz"
+assert anon.get("/api/tree").status_code == 401
+
 print("OK: todos los checks pasan")

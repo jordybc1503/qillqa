@@ -4,12 +4,13 @@ Cuaderno local de páginas anidadas con MCP, web y búsqueda semántica. *Qillqa
 
 - **Página** = carpeta en `pages/` (o en `QILLQA_PAGES_DIR`) con `index.md` o `index.html`. Sus subcarpetas son subpáginas. También puedes editar los archivos a mano.
 - **MCP** (`server.py`, stdio):
-  - Para escribir: `create_page`, `update_page`, `get_page`, `list_pages`, `move_page`, `delete_page`. Escribe directo en disco; no necesita el servidor.
+  - Para escribir: `create_page`, `update_page`, `attach_file`, `get_page`, `list_pages`, `move_page`, `delete_page`. Escribe directo en disco; no necesita el servidor.
   - Para buscar: `search`. Arranca el servidor solo si hace falta.
   - Para el servidor: `start_server`, `server_status`, `stop_server`.
 - **Web** (`webui.py`): `http://127.0.0.1:47391`, con login por el token de `.env`. Muestra el árbol, las páginas y la búsqueda.
   - Cada página se muestra aislada (CSP sandbox), así que su JS no puede usar tu sesión.
-  - **Las páginas HTML deben ser autocontenidas**: estilos y scripts en línea o por CDN, sin archivos locales.
+  - **Archivos**: fotos, vídeos, audio, PDFs, `.css`, `.js` o cualquier otro archivo van en la carpeta de la página (`attach_file` o a mano). Se referencian con ruta relativa: `![foto](foto.jpg)`, `![demo](clip.mp4)` (vídeo y audio salen con reproductor), `[informe](informe.pdf)`, `<link href="estilo.css">`.
+  - Cada página se sirve en una URL firmada, `/f/<firma>/<carpeta>/`, que solo abre esa carpeta y sus subpáginas. `/view?path=<ruta>` te lleva a ella si tienes sesión.
 - **Búsqueda semántica** con `Qwen/Qwen3-Embedding-0.6B` (local, multilingüe), en la GPU si hay; si no, en CPU con fp32.
   - El índice vive en `var/index-*.db`. Se actualiza por mtime en dos momentos: en segundo plano tras cada escritura del MCP y antes de cada búsqueda.
   - El modelo corre en un **proceso hijo** (`embedder.py`) que se cierra tras `QILLQA_MODEL_IDLE_MIN` minutos sin uso, y entonces se libera toda su RAM y VRAM. El servidor web nunca carga torch.
