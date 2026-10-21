@@ -32,6 +32,14 @@ claude mcp add -s user qillqa -- ~/code/mcp/qillqa/.venv/bin/python ~/code/mcp/q
 Configuración en `.env` (ver `.env.example`): host, puerto, token, carpeta de páginas, modelo e inactividad.
 Si cambias de modelo se crea un índice nuevo, porque los vectores de modelos distintos no se mezclan.
 
+## Acceso desde otros equipos (opcional)
+Con [Tailscale](https://tailscale.com) obtienes un link HTTPS privado, solo para tus dispositivos, sin abrir puertos:
+```bash
+sudo tailscale serve --bg 47391        # → https://<maquina>.<red>.ts.net (pide el token igual)
+sudo tailscale serve --https=443 off   # para quitarlo
+```
+La primera vez, Tailscale pide activar "Serve" en tu red. Si cambias de puerto, usa el valor de `QILLQA_PORT`.
+
 ## Probar
 ```bash
 .venv/bin/python test_qillqa.py     # checks sin modelo (embedder falso)
