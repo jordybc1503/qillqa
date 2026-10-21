@@ -195,11 +195,16 @@ async def lifespan(_app):
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
 
+def _eq(a: str, b: str) -> bool:
+    """compare_digest en bytes: con str y caracteres no ASCII lanza TypeError."""
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
 def _authed(req: Request) -> bool:
     auth = req.headers.get("authorization", "")
-    if TOKEN and auth.startswith("Bearer ") and hmac.compare_digest(auth[7:], TOKEN):
+    if TOKEN and auth.startswith("Bearer ") and _eq(auth[7:].strip(), TOKEN):
         return True
-    return bool(TOKEN) and hmac.compare_digest(req.cookies.get(COOKIE, ""), SESSION)
+    return bool(TOKEN) and _eq(req.cookies.get(COOKIE, ""), SESSION)
 
 
 @app.middleware("http")
@@ -227,7 +232,7 @@ def login_page(error: str = ""):
 @app.post("/login")
 async def login(req: Request):
     token = urllib.parse.parse_qs((await req.body()).decode()).get("token", [""])[0]
-    if not TOKEN or not hmac.compare_digest(token, TOKEN):
+    if not TOKEN or not _eq(token.strip(), TOKEN):
         return RedirectResponse("/login?error=1", status_code=303)
     r = RedirectResponse("/", status_code=303)
     r.set_cookie(COOKIE, SESSION, httponly=True, samesite="strict", max_age=90 * 86400)

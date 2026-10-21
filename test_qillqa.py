@@ -103,7 +103,8 @@ assert c.get("/", follow_redirects=False).status_code == 303
 assert c.get("/api/tree", headers={"Authorization": "Bearer mal"}).status_code == 401
 assert c.get("/api/tree", headers={"Authorization": "Bearer t0k-secreto"}).status_code == 200
 assert c.post("/login", data={"token": "mal"}, follow_redirects=False).headers["location"].startswith("/login?")
-r = c.post("/login", data={"token": "t0k-secreto"}, follow_redirects=False)
+assert c.post("/login", data={"token": "tök\u00a0"}, follow_redirects=False).headers["location"].startswith("/login?")
+r = c.post("/login", data={"token": " t0k-secreto\n"}, follow_redirects=False)
 assert r.headers["location"] == "/" and "httponly" in r.headers["set-cookie"].lower()
 assert c.get("/api/tree").status_code == 200
 v = c.get("/view?path=cocina")
