@@ -161,6 +161,13 @@ def sync() -> int:
     return changed
 
 
+def _plain(md: str) -> str:
+    """Snippet text without Markdown/HTML syntax."""
+    md = re.sub(r"```\w*|<[^>]+>|!\[([^\]]*)\]\([^)]*\)|\[([^\]]*)\]\([^)]*\)", r"\1\2", md)
+    md = re.sub(r"^\s*(#+|[-*>](?=\s)|\|?-{3,}.*)\s*", "", md, flags=re.M)
+    return re.sub(r"\s+", " ", md.replace("**", "").replace("`", "").replace("|", " ")).strip()
+
+
 def search(q: str, limit: int = 10) -> list[dict]:
     sync()
     with contextlib.closing(_db()) as con:
@@ -178,7 +185,7 @@ def search(q: str, limit: int = 10) -> list[dict]:
         if path not in best:
             title, _, body = text.partition("\n\n")
             best[path] = {"path": path, "title": title, "score": round(float(scores[k]), 4),
-                          "snippet": body[:300]}
+                          "snippet": _plain(body)[:300]}
             if len(best) >= limit:
                 break
     return list(best.values())
@@ -359,16 +366,38 @@ def signed_file(sig: str, rest: str, req: Request):
 
 
 CSS = """
-:root{--bg:#fbfaf7;--fg:#1f1d1a;--mute:#6b665e;--line:#e4e0d8;--card:#fff;--acc:#a8462b;color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root{--bg:#161513;--fg:#ece8e1;--mute:#a19b91;--line:#2f2c28;--card:#1e1c1a;--acc:#e0805f}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif}
-a{color:var(--acc)}code,pre{font-family:ui-monospace,monospace;font-size:.9em}
-pre{background:var(--card);border:1px solid var(--line);padding:12px;overflow:auto;border-radius:6px}
-table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:4px 8px}
-article{max-width:780px;margin:0 auto;padding:24px 16px}img{max-width:100%}
-.login{max-width:320px;margin:20vh auto;display:grid;gap:12px;padding:0 16px}
-input,button{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
-button{cursor:pointer;background:var(--acc);color:#fff;border:0}.err{color:var(--acc);margin:0}
+:root{--bg:#f4f6fb;--fg:#1d2433;--mute:#5d6680;--line:#e2e6f0;--card:#fff;--acc:#5b3fd0;
+--c1:#0f7c8c;--c2:#c2502e;--c3:#6d4bd1;--c4:#c98300;--c5:#2f8f5b;color-scheme:light}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 system-ui,sans-serif}
+a{color:var(--acc);text-underline-offset:3px}code,pre{font-family:ui-monospace,monospace;font-size:.9em}
+article{max-width:880px;margin:24px auto;padding:36px 44px;background:var(--card);border-radius:18px;
+box-shadow:0 1px 3px #1d243314,0 12px 32px #1d24330d}
+article h1{font-size:2.3em;line-height:1.15;margin:0 0 .6em;padding-bottom:.35em;
+background:linear-gradient(90deg,var(--c2),var(--c3) 55%,var(--c1));-webkit-background-clip:text;background-clip:text;color:transparent;
+border-bottom:4px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),var(--c1)) 1}
+article h2{--c:var(--c1);margin:1.8em 0 .7em;padding:8px 14px;border-left:6px solid var(--c);border-radius:8px;
+background:color-mix(in srgb,var(--c) 11%,#fff);color:color-mix(in srgb,var(--c) 75%,#000)}
+article h2:nth-of-type(5n+2){--c:var(--c2)}article h2:nth-of-type(5n+3){--c:var(--c3)}
+article h2:nth-of-type(5n+4){--c:var(--c4)}article h2:nth-of-type(5n+5){--c:var(--c5)}
+article h3{color:var(--c3);margin:1.6em 0 .5em;padding-bottom:4px;border-bottom:2px dotted color-mix(in srgb,var(--c3) 35%,#fff)}
+article li::marker{color:var(--c2)}
+code{background:#fff0ea;color:#a8401c;padding:1px 6px;border-radius:5px}
+pre{background:#f5f7ff;border:1px solid #e3e7fb;border-left:4px solid var(--c3);padding:14px 16px;overflow:auto;border-radius:10px}
+pre code{background:none;color:#1d2433;padding:0}
+blockquote{margin:1em 0;padding:10px 16px;background:#ecf8f6;border-left:4px solid var(--c1);border-radius:8px;color:#174a52}
+blockquote p{margin:.4em 0}
+table{border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:1em 0}
+th{background:linear-gradient(90deg,var(--c1),var(--c3));color:#fff;text-align:left;font-weight:600}
+td,th{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}
+tbody tr:nth-child(even) td{background:#f7f8fe}
+hr{border:0;height:3px;background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));border-radius:3px}
+img,video{max-width:100%;border-radius:10px;box-shadow:0 4px 16px #1d24331f}audio{width:100%}
+@media (max-width:640px){article{margin:0;padding:22px 16px;border-radius:0;box-shadow:none}}
+.login{max-width:340px;margin:18vh auto;display:grid;gap:12px;padding:28px;background:var(--card);border-radius:16px;
+box-shadow:0 12px 32px #1d24331a}
+.login h1{margin:0;background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));-webkit-background-clip:text;background-clip:text;color:transparent}
+input,button{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
+button{cursor:pointer;background:linear-gradient(90deg,var(--c3),var(--c1));color:#fff;border:0}.err{color:var(--c2);margin:0}
 """
 
 
@@ -387,18 +416,25 @@ INDEX = """
 <iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals" title="page"></iframe>
 <p id="empty">Pick a page or search for something.</p></section></main>
 <style>
-header{display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line)}
-.brand{font-weight:700;text-decoration:none;color:var(--fg)}#q{flex:1;min-width:0}.out{color:var(--mute);font-size:.9em}
-main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 59px)}
-aside{border-right:1px solid var(--line);overflow:auto;padding:8px}#toggle{display:none}
+header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--card);
+border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),var(--c1)) 1}
+.brand{font-weight:800;font-size:1.15em;text-decoration:none;background:linear-gradient(90deg,var(--c2),var(--c3));
+-webkit-background-clip:text;background-clip:text;color:transparent}
+#q{flex:1;min-width:0;background:var(--bg)}#q:focus{outline:2px solid var(--c3);background:#fff}.out{color:var(--mute);font-size:.9em}
+main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 62px)}
+aside{background:#fbfcff;border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
 nav ul{list-style:none;margin:0;padding-left:14px}nav>ul{padding-left:0}
-nav a{display:block;padding:3px 6px;border-radius:4px;color:var(--fg);text-decoration:none;overflow-wrap:anywhere}
-nav a.sec{color:var(--mute)}nav a.on{background:var(--line)}
+nav a{display:block;padding:4px 8px;border-radius:6px;color:var(--fg);text-decoration:none;overflow-wrap:anywhere}
+nav a:hover{background:color-mix(in srgb,var(--c3) 8%,#fff)}
+nav a.sec{color:var(--c1);font-weight:600}
+nav a.on{background:color-mix(in srgb,var(--c3) 14%,#fff);color:color-mix(in srgb,var(--c3) 80%,#000);font-weight:600;
+box-shadow:inset 3px 0 0 var(--c3)}
 section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;width:100%;background:var(--bg)}
-#crumb{padding:6px 16px;color:var(--mute);font-size:.85em;overflow-wrap:anywhere}#empty{padding:24px 16px;color:var(--mute)}
-#results{padding:8px 16px;border-bottom:1px solid var(--line);max-height:45vh;overflow:auto}
-.hit{display:block;padding:8px 0;border-bottom:1px solid var(--line);color:var(--fg);text-decoration:none}
-.hit b{color:var(--acc)}.hit small{color:var(--mute);display:block}
+#crumb{padding:6px 16px;color:var(--c1);font-size:.85em;font-weight:600;overflow-wrap:anywhere}#empty{padding:24px 16px;color:var(--mute)}
+#results{padding:8px 16px;background:var(--card);border-bottom:1px solid var(--line);max-height:45vh;overflow:auto}
+.hit{display:block;padding:10px 12px;margin:6px 0;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none}
+.hit:hover{border-color:var(--c3);background:color-mix(in srgb,var(--c3) 5%,#fff)}
+.hit b{color:var(--c3)}.hit small{color:var(--c1);display:block}
 @media (max-width:760px){main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
 #toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
 nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}

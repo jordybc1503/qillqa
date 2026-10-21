@@ -89,6 +89,7 @@ assert webui.sync() == 1
 hits = webui.search("battery warranty")
 assert hits[0]["path"] == "bikes/warranty", hits
 assert webui.search("zzzz qqqq xxxx") == [], "returned noise below the threshold"
+assert webui._plain("## Part\n\n**Bold** `code` ![img](a.png) [link](b.md)\n```json\n{}\n```") == "Part Bold code img link {}"
 server._move("bikes", "vehicles")
 webui.sync()
 assert {h["path"] for h in webui.search("battery warranty")} >= {"vehicles/warranty"}
