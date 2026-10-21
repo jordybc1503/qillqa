@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""qillqa MCP (stdio) — cuaderno local de páginas anidadas.
+"""qillqa MCP (stdio): a local notebook of nested pages.
 
-Una página es una carpeta bajo QILLQA_PAGES_DIR con index.md o index.html;
-sus subcarpetas son subpáginas. Las escrituras van directo al disco (sin
-servidor) y después se le pide al servidor web local (webui.py) que indexe en
-segundo plano; el MCP lo arranca bajo demanda (~0,5 s).
+A page is a folder under QILLQA_PAGES_DIR holding index.md or index.html; its
+subfolders are subpages. Writes go straight to disk (no server needed), then
+the local web server (webui.py) is asked to index in the background; the MCP
+starts it on demand (~0.5 s).
 
-No importar torch/numpy/sentence_transformers aquí: este módulo carga en el
-handshake del MCP y webui.py lo importa.
+Do not import torch/numpy/sentence_transformers here: this module loads during
+the MCP handshake and webui.py imports it.
 """
 from __future__ import annotations
 
@@ -40,13 +40,13 @@ URL = f"http://{HOST}:{PORT}"
 mcp = FastMCP("qillqa")
 
 
-# ---------------------------------------------------------------- páginas
+# ---------------------------------------------------------------- pages
 
 def _safe(path: str) -> Path:
-    """Ruta de página → carpeta dentro de PAGES. Rechaza todo lo que salga."""
+    """Page path -> folder inside PAGES. Rejects anything that escapes it."""
     p = (PAGES / (path or "").strip().strip("/")).resolve()
     if p != PAGES and PAGES not in p.parents:
-        raise ValueError(f"ruta fuera del cuaderno: {path!r}")
+        raise ValueError(f"path outside the notebook: {path!r}")
     return p
 
 
@@ -80,7 +80,7 @@ def tree(path: str = "") -> list[dict]:
                 "children": [node(c) for c in _children(d)]}
     root = _safe(path)
     if not root.is_dir():
-        raise ValueError(f"no existe: {path!r}")
+        raise ValueError(f"does not exist: {path!r}")
     return [node(c) for c in _children(root)]
 
 
@@ -88,7 +88,7 @@ def read_page(path: str) -> dict:
     d = _safe(path)
     idx = _index(d)
     if not idx:
-        raise ValueError(f"no hay página en {path!r}")
+        raise ValueError(f"no page at {path!r}")
     return {"path": _rel(d), "title": _title(d), "format": idx.suffix[1:],
             "content": idx.read_text(errors="replace"),
             "children": [_rel(c) for c in _children(d)], "files": _files(d),
@@ -105,16 +105,16 @@ _MEDIA = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif",
 
 
 def attach(path: str, source: str, name: str = "") -> dict:
-    """Copia un archivo local a la carpeta de la página."""
+    """Copy a local file into the page folder."""
     d = _safe(path)
     if d == PAGES or not d.is_dir():
-        raise ValueError(f"no existe la página {path!r}; créala primero")
+        raise ValueError(f"page {path!r} does not exist; create it first")
     src = Path(os.path.expanduser(source))
     if not src.is_file():
-        raise ValueError(f"no existe el archivo {source!r}")
+        raise ValueError(f"file {source!r} does not exist")
     name = name or src.name
     if "/" in name or "\\" in name or name.startswith(".") or name in INDEX_NAMES:
-        raise ValueError(f"nombre de archivo no válido: {name!r}")
+        raise ValueError(f"invalid file name: {name!r}")
     shutil.copyfile(src, d / name)
     ref = urllib.parse.quote(name)
     md = f"![{name}]({ref})" if Path(name).suffix.lower() in _MEDIA else f"[{name}]({ref})"
@@ -123,17 +123,17 @@ def attach(path: str, source: str, name: str = "") -> dict:
 
 def write_page(path: str, content: str, fmt: str, create: bool) -> dict:
     if fmt not in ("md", "html"):
-        raise ValueError("format debe ser 'md' o 'html'")
+        raise ValueError("format must be 'md' or 'html'")
     d = _safe(path)
     if d == PAGES:
-        raise ValueError("indica una ruta de página, p.ej. 'proyecto/apunte'")
+        raise ValueError("give a page path, e.g. 'project/note'")
     exists = _index(d) is not None
     if create and exists:
-        raise ValueError(f"ya existe {path!r}; usa update_page")
+        raise ValueError(f"{path!r} already exists; use update_page")
     if not create and not exists:
-        raise ValueError(f"no existe {path!r}; usa create_page")
+        raise ValueError(f"{path!r} does not exist; use create_page")
     d.mkdir(parents=True, exist_ok=True)
-    for n in INDEX_NAMES:  # cambiar de formato no deja el index viejo
+    for n in INDEX_NAMES:  # switching format must not leave the old index behind
         if n != f"index.{fmt}":
             (d / n).unlink(missing_ok=True)
     (d / f"index.{fmt}").write_text(content)
@@ -143,11 +143,11 @@ def write_page(path: str, content: str, fmt: str, create: bool) -> dict:
 def _move(src: str, dst: str) -> dict:
     s, t = _safe(src), _safe(dst)
     if s == PAGES or not s.is_dir():
-        raise ValueError(f"no existe {src!r}")
+        raise ValueError(f"{src!r} does not exist")
     if t.exists():
-        raise ValueError(f"ya existe {dst!r}")
+        raise ValueError(f"{dst!r} already exists")
     if t == s or s in t.parents:
-        raise ValueError("no se puede mover una página dentro de sí misma")
+        raise ValueError("cannot move a page inside itself")
     t.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(s), str(t))
     return {"path": _rel(t), "url": f"{URL}/#{_rel(t)}"}
@@ -156,15 +156,15 @@ def _move(src: str, dst: str) -> dict:
 def _delete(path: str, recursive: bool = False) -> dict:
     d = _safe(path)
     if d == PAGES or not d.is_dir():
-        raise ValueError(f"no existe {path!r}")
+        raise ValueError(f"{path!r} does not exist")
     kids = _children(d)
     if kids and not recursive:
-        raise ValueError(f"{path!r} tiene {len(kids)} subpáginas; pasa recursive=True")
+        raise ValueError(f"{path!r} has {len(kids)} subpages; pass recursive=True")
     shutil.rmtree(d)
     return {"deleted": _rel(d)}
 
 
-# ---------------------------------------------------------------- servidor
+# ---------------------------------------------------------------- server
 
 def _health() -> bool:
     try:
@@ -178,7 +178,7 @@ def start() -> dict:
     if _health():
         return {"running": True, "url": URL}
     if not TOKEN:
-        raise RuntimeError("QILLQA_TOKEN vacío en .env; corre setup.sh o pon un token")
+        raise RuntimeError("QILLQA_TOKEN is empty in .env; run setup.sh or set a token")
     VAR.mkdir(exist_ok=True)
     log = open(VAR / "server.log", "ab")
     proc = subprocess.Popen(
@@ -192,7 +192,7 @@ def start() -> dict:
         if proc.poll() is not None:
             break
         time.sleep(0.5)
-    raise RuntimeError(f"el servidor no arrancó; mira {VAR / 'server.log'}")
+    raise RuntimeError(f"the server did not start; see {VAR / 'server.log'}")
 
 
 def stop() -> dict:
@@ -202,7 +202,7 @@ def stop() -> dict:
     except (OSError, ValueError):
         pass
     pidf.unlink(missing_ok=True)
-    for _ in range(20):  # apagado ordenado de uvicorn
+    for _ in range(20):  # uvicorn's graceful shutdown
         if not _health():
             break
         time.sleep(0.5)
@@ -214,20 +214,20 @@ def _search(query: str, limit: int) -> list[dict]:
     q = urllib.parse.urlencode({"q": query, "limit": limit})
     req = urllib.request.Request(f"{URL}/api/search?{q}",
                                  headers={"Authorization": f"Bearer {TOKEN}"})
-    with urllib.request.urlopen(req, timeout=900) as r:  # 1ª vez: carga modelo + indexa
+    with urllib.request.urlopen(req, timeout=900) as r:  # first call: loads the model and indexes
         return json.load(r)
 
 
 def _reindex() -> None:
-    """Tras escribir: enciende el servidor si hace falta y le pide indexar en
-    segundo plano, para que la próxima búsqueda no pague la indexación."""
+    """After a write: start the server if needed and ask it to index in the
+    background, so the next search does not pay for indexing."""
     try:
         start()
         req = urllib.request.Request(f"{URL}/api/sync", method="POST",
                                      headers={"Authorization": f"Bearer {TOKEN}"})
         urllib.request.urlopen(req, timeout=5).close()
     except Exception:
-        pass  # la búsqueda vuelve a sincronizar igual
+        pass  # search syncs again anyway
 
 
 # ---------------------------------------------------------------- tools
@@ -248,80 +248,80 @@ def _dump(fn, *a, **kw) -> str:
 
 @mcp.tool()
 def create_page(path: str, content: str, format: str = "md") -> str:
-    """Guarda una página NUEVA en el cuaderno local qillqa. Úsalo para apuntes,
-    informes, resúmenes de llamadas y notas de proyectos que quieras conservar
-    y buscar después (en lugar de un Artifact). `path` es jerárquico con '/',
-    p.ej. 'trez/edwin/llamada-2026-10-21'; cada nivel es una página que puede
-    tener subpáginas. `format`: 'md' (por defecto) o 'html' (página tipo
-    artifact con su CSS/JS). Fotos, vídeos, PDFs, .css/.js y demás archivos
-    se añaden con attach_file y se referencian con ruta relativa:
-    ![foto](foto.jpg), ![demo](clip.mp4) (vídeo/audio se reproducen),
-    [informe](informe.pdf), <link href="estilo.css">. Devuelve la URL web."""
+    """Save a NEW page in the local qillqa notebook. Use it for notes,
+    reports, call summaries and project notes you want to keep and search
+    later (instead of an Artifact). `path` is hierarchical with '/', e.g.
+    'project/meetings/2026-10-21'; every level is a page that can have
+    subpages. `format`: 'md' (default) or 'html' (an artifact-like page with
+    its own CSS/JS). Photos, videos, PDFs, .css/.js and any other files are
+    added with attach_file and referenced by relative path:
+    ![photo](photo.jpg), ![demo](clip.mp4) (video/audio get a player),
+    [report](report.pdf), <link href="style.css">. Returns the web URL."""
     return _write(write_page, path, content, format, create=True)
 
 
 @mcp.tool()
 def update_page(path: str, content: str, format: str = "md") -> str:
-    """Reemplaza el contenido de una página existente de qillqa (lee antes con get_page)."""
+    """Replace the content of an existing qillqa page (read it first with get_page)."""
     return _write(write_page, path, content, format, create=False)
 
 
 @mcp.tool()
 def get_page(path: str) -> str:
-    """Lee una página de qillqa: título, formato, contenido y subpáginas."""
+    """Read a qillqa page: title, format, content, subpages and attached files."""
     return _dump(read_page, path)
 
 
 @mcp.tool()
 def attach_file(path: str, source: str, name: str = "") -> str:
-    """Adjunta un archivo local (foto, vídeo, audio, PDF, .css, .js, lo que sea)
-    a la página `path` de qillqa, copiándolo a su carpeta. `source` es la ruta
-    del archivo en este equipo; `name` (opcional) es el nombre destino.
-    Devuelve el Markdown para insertarlo en la página con update_page."""
+    """Attach a local file (photo, video, audio, PDF, .css, .js, anything) to
+    the qillqa page `path` by copying it into the page folder. `source` is the
+    file's path on this machine; `name` (optional) is the target file name.
+    Returns the Markdown to insert into the page with update_page."""
     return _dump(attach, path, source, name)
 
 
 @mcp.tool()
 def list_pages(path: str = "") -> str:
-    """Árbol de páginas de qillqa bajo `path` ('' = todo), con títulos."""
+    """Tree of qillqa pages under `path` ('' = everything), with titles."""
     return _dump(tree, path)
 
 
 @mcp.tool()
 def search(query: str, limit: int = 10) -> str:
-    """Búsqueda semántica (por significado, en cualquier idioma) en todas las
-    páginas de qillqa. Arranca el servidor local si hace falta; la primera vez
-    tarda en cargar el modelo e indexar."""
+    """Semantic search (by meaning, in any language) across all qillqa pages.
+    Starts the local server if needed; the first call takes a few seconds to
+    load the model and index."""
     return _dump(_search, query, limit)
 
 
 @mcp.tool()
 def move_page(src: str, dst: str) -> str:
-    """Mueve o renombra una página de qillqa con todas sus subpáginas."""
+    """Move or rename a qillqa page together with all its subpages."""
     return _write(_move, src, dst)
 
 
 @mcp.tool()
 def delete_page(path: str, recursive: bool = False) -> str:
-    """Borra una página de qillqa. Si tiene subpáginas exige recursive=True."""
+    """Delete a qillqa page. If it has subpages, recursive=True is required."""
     return _write(_delete, path, recursive)
 
 
 @mcp.tool()
 def start_server() -> str:
-    """Arranca el servidor web local de qillqa (navegar y buscar páginas) y devuelve su URL."""
+    """Start the local qillqa web server (browse and search pages) and return its URL."""
     return _dump(start)
 
 
 @mcp.tool()
 def server_status() -> str:
-    """Dice si el servidor web de qillqa está arriba y su URL."""
+    """Report whether the qillqa web server is up, and its URL."""
     return _dump(lambda: {"running": _health(), "url": URL, "pages_dir": str(PAGES)})
 
 
 @mcp.tool()
 def stop_server() -> str:
-    """Detiene el servidor web de qillqa (libera la RAM del modelo)."""
+    """Stop the qillqa web server (frees all its memory)."""
     return _dump(stop)
 
 

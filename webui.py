@@ -1,9 +1,9 @@
-"""qillqa web: navegar y buscar páginas (FastAPI). Lo arranca el MCP (start_server).
+"""qillqa web: browse and search pages (FastAPI). Started by the MCP (start_server).
 
-Índice semántico en var/index-<modelo>.db, sincronizado por mtime antes de cada
-búsqueda y tras cada escritura del MCP (POST /api/sync). El modelo corre en un
-proceso hijo (embedder.py) que se cierra tras QILLQA_MODEL_IDLE_MIN minutos sin
-uso, así que el servidor queda en ~76 MB y sin torch.
+Semantic index in var/index-<model>.db, synced by mtime before every search and
+after every MCP write (POST /api/sync). The model runs in a child process
+(embedder.py) that exits after QILLQA_MODEL_IDLE_MIN idle minutes, so the server
+itself stays at ~76 MB with no torch loaded.
 """
 from __future__ import annotations
 
@@ -31,9 +31,9 @@ import embedder
 from server import MODEL, PAGES, TOKEN, VAR, _index, _rel, _safe, _title, read_page, tree
 
 IDLE_MIN = float(os.environ.get("QILLQA_MODEL_IDLE_MIN", "15"))
-# Calibrado con Qwen3-Embedding-0.6B: aciertos 0.42-0.60, ruido <= 0.21
+# Calibrated on Qwen3-Embedding-0.6B: hits 0.41-0.65, noise <= 0.21
 MIN_SCORE = float(os.environ.get("QILLQA_MIN_SCORE", "0.3"))
-DB = VAR / f"index-{hashlib.sha1(MODEL.encode()).hexdigest()[:8]}.db"  # otro modelo = otro índice
+DB = VAR / f"index-{hashlib.sha1(MODEL.encode()).hexdigest()[:8]}.db"  # another model = another index
 COOKIE = "qillqa"
 SESSION = hmac.new(TOKEN.encode(), b"qillqa-session", hashlib.sha256).hexdigest()
 
@@ -45,9 +45,9 @@ _last_use = 0.0
 
 
 def embed(texts: list[str], query: bool = False) -> np.ndarray:
-    """Vectores normalizados (float32). El modelo vive en un proceso hijo."""
+    """Normalized vectors (float32). The model lives in a child process."""
     global _pool, _last_use
-    with _pool_lock:  # también impide que el reaper cierre el hijo a mitad de una llamada
+    with _pool_lock:  # also keeps the reaper from closing the child mid-call
         if _pool is None:
             _pool = ProcessPoolExecutor(1, mp_context=multiprocessing.get_context("spawn"))
         v = _pool.submit(embedder.encode, texts, query).result()
@@ -61,11 +61,11 @@ def _reaper() -> None:
         time.sleep(30)
         with _pool_lock:
             if _pool is not None and time.time() - _last_use > IDLE_MIN * 60:
-                _pool.shutdown()  # el hijo termina: RAM y VRAM vuelven al sistema
+                _pool.shutdown()  # the child exits: RAM and VRAM go back to the system
                 _pool = None
 
 
-# ---------------------------------------------------------------- índice
+# ---------------------------------------------------------------- index
 
 _BLOCKS = {"title", "p", "div", "li", "br", "tr", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6",
            "section", "article", "header", "footer", "pre", "blockquote", "ul", "ol", "table"}
@@ -133,13 +133,13 @@ def _pages() -> dict[str, Path]:
         if not d.is_dir() or any(p.startswith(".") for p in d.relative_to(PAGES).parts):
             continue
         idx = _index(d)
-        if idx and PAGES in idx.resolve().parents:  # sin symlinks hacia fuera
+        if idx and PAGES in idx.resolve().parents:  # no symlinks escaping the notebook
             found[_rel(d)] = idx
     return found
 
 
 def sync() -> int:
-    """Re-embebe las páginas nuevas o cambiadas y olvida las borradas."""
+    """Re-embed new or changed pages and forget deleted ones."""
     changed = 0
     with _sync_lock, contextlib.closing(_db()) as con:
         known = dict(con.execute("select path, max(mtime) from chunks group by path"))
@@ -196,7 +196,7 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
 
 
 def _eq(a: str, b: str) -> bool:
-    """compare_digest en bytes: con str y caracteres no ASCII lanza TypeError."""
+    """compare_digest on bytes: on str with non-ASCII chars it raises TypeError."""
     return hmac.compare_digest(a.encode(), b.encode())
 
 
@@ -223,10 +223,10 @@ def health():
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
-    msg = '<p class="err">Token incorrecto</p>' if error else ""
-    return _shell("Entrar", f"""<form method="post" action="/login" class="login">
+    msg = '<p class="err">Wrong token</p>' if error else ""
+    return _shell("Sign in", f"""<form method="post" action="/login" class="login">
 <h1>qillqa</h1>{msg}<input type="password" name="token" placeholder="Token" autofocus required>
-<button>Entrar</button></form>""")
+<button>Sign in</button></form>""")
 
 
 @app.post("/login")
@@ -267,7 +267,7 @@ def api_page(path: str = ""):
 
 @app.post("/api/sync")
 def api_sync():
-    """Indexa en segundo plano; el MCP lo llama tras crear/editar/mover/borrar."""
+    """Index in the background; the MCP calls it after create/update/move/delete."""
     threading.Thread(target=sync, daemon=True).start()
     return {"ok": True}
 
@@ -278,10 +278,11 @@ def api_search(q: str = "", limit: int = 10):
 
 
 # ---------------------------------------------------------------- archivos
-# Cada página se sirve bajo /f/<firma>/<carpeta>/ : las rutas relativas del md
-# o html (fotos, vídeos, .css, .js, PDFs) funcionan sin cookie, porque la página
-# corre aislada (origen opaco). La firma solo abre esa carpeta y sus subpáginas.
-# ponytail: firmas sin caducidad; añadirla si algún día se expone a internet.
+# Every page is served under /f/<sig>/<folder>/ so relative links in the md or
+# html (photos, videos, .css, .js, PDFs) work without a cookie, because the page
+# runs sandboxed (opaque origin). A signature only opens that folder and its
+# subpages.
+# ponytail: signatures never expire; add expiry if this is ever exposed to the internet.
 
 def _sig(rel: str) -> str:
     return hmac.new(TOKEN.encode(), b"f:" + rel.encode(), hashlib.sha256).hexdigest()[:32]
@@ -300,7 +301,7 @@ _AUDIO = r"mp3|wav|m4a|ogg|flac|opus"
 
 def _render_md(title: str, text: str) -> str:
     body = markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
-    # ![x](clip.mp4) → reproductor de vídeo / audio
+    # ![x](clip.mp4) -> video / audio player
     body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_VIDEO}))"\s*/?>',
                   r'<video controls preload="metadata" src="\2" title="\1"></video>', body, flags=re.I)
     body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_AUDIO}))"\s*/?>',
@@ -310,13 +311,13 @@ def _render_md(title: str, text: str) -> str:
 
 @app.get("/view")
 def view(path: str = ""):
-    """Abre la página (requiere sesión) en su URL firmada."""
+    """Open the page (session required) at its signed URL."""
     try:
         d = _safe(path)
     except ValueError as e:
         _bad(e)
     if d == PAGES or not _index(d):
-        _bad(ValueError(f"no hay página en {path!r}"))
+        _bad(ValueError(f"no page at {path!r}"))
     return RedirectResponse(signed_url(_rel(d)), status_code=303)
 
 
@@ -324,8 +325,8 @@ def view(path: str = ""):
 def signed_file(sig: str, rest: str, req: Request):
     parts = [p for p in rest.split("/") if p]
     if not parts or any(p == ".." or p.startswith(".") for p in parts):
-        _bad(ValueError("ruta no válida"))
-    # carpeta firmada = el prefijo más largo cuya firma coincide (nunca la raíz)
+        _bad(ValueError("invalid path"))
+    # signed folder = the longest prefix whose signature matches (never the root)
     scope = next((PAGES.joinpath(*parts[:n]) for n in range(len(parts), 0, -1)
                   if hmac.compare_digest(sig, _sig("/".join(parts[:n])))), None)
     try:
@@ -333,13 +334,13 @@ def signed_file(sig: str, rest: str, req: Request):
     except ValueError as e:
         _bad(e)
     if scope is None or (target != scope.resolve() and scope.resolve() not in target.parents):
-        _bad(ValueError("firma no válida"))
+        _bad(ValueError("invalid signature"))
     if target.is_dir():
-        if not req.url.path.endswith("/"):  # las rutas relativas necesitan la barra final
+        if not req.url.path.endswith("/"):  # relative links need the trailing slash
             return RedirectResponse(req.url.path + "/", status_code=307)
         idx = _index(target)
         if not idx:
-            _bad(ValueError("no hay página aquí"))
+            _bad(ValueError("no page here"))
         text = idx.read_text(errors="replace")
         html_page = idx.suffix == ".html"
         return Response(text if html_page else _render_md(_title(target), text),
@@ -347,9 +348,9 @@ def signed_file(sig: str, rest: str, req: Request):
                         headers={**_SAFE_HEADERS, "Cache-Control": "no-store",
                                  "Content-Security-Policy": _HTML_SANDBOX if html_page else _MD_SANDBOX})
     if not target.is_file():
-        _bad(ValueError("no existe"))
+        _bad(ValueError("not found"))
     r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private"})
-    if r.media_type != "application/pdf":  # Chrome no renderiza PDFs en sandbox
+    if r.media_type != "application/pdf":  # Chrome refuses to render PDFs in a sandbox
         r.headers["Content-Security-Policy"] = (_HTML_SANDBOX if r.media_type.startswith("text/html")
                                                  else "sandbox")
     return r
@@ -370,19 +371,19 @@ button{cursor:pointer;background:var(--acc);color:#fff;border:0}.err{color:var(-
 
 
 def _shell(title: str, body: str) -> str:
-    return (f'<!doctype html><html lang="es"><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
             f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body>{body}</body></html>")
 
 
 INDEX = """
 <header><a href="#" class="brand">qillqa</a>
-<input id="q" type="search" placeholder="Buscar por significado…" autocomplete="off">
-<a href="/logout" class="out">salir</a></header>
-<main><aside><button id="toggle">Páginas</button><nav id="tree"></nav></aside>
+<input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
+<a href="/logout" class="out">sign out</a></header>
+<main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
-<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals" title="página"></iframe>
-<p id="empty">Elige una página o busca algo.</p></section></main>
+<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals" title="page"></iframe>
+<p id="empty">Pick a page or search for something.</p></section></main>
 <style>
 header{display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line)}
 .brand{font-weight:700;text-decoration:none;color:var(--fg)}#q{flex:1;min-width:0}.out{color:var(--mute);font-size:.9em}
@@ -426,11 +427,11 @@ $('#q').addEventListener('input',()=>{clearTimeout(t);t=setTimeout(find,400)});
 async function find(){
   const q=$('#q').value.trim(),box=$('#results');
   if(!q){box.hidden=true;return}
-  box.hidden=false;box.replaceChildren(mk('small',{textContent:'Buscando… (la primera vez carga el modelo)'}));
+  box.hidden=false;box.replaceChildren(mk('small',{textContent:'Searching… (the first search loads the model)'}));
   const hits=await api('/api/search?q='+encodeURIComponent(q));
   box.replaceChildren(...(hits.length?hits.map(h=>mk('a',{className:'hit',href:'#'+h.path},
     mk('b',{textContent:h.title}),mk('small',{textContent:h.path+' · '+h.score}),
-    mk('span',{textContent:h.snippet}))):[mk('small',{textContent:'Sin resultados'})]));
+    mk('span',{textContent:h.snippet}))):[mk('small',{textContent:'No results'})]));
 }
 $('#toggle').onclick=()=>$('nav').classList.toggle('open');
 addEventListener('hashchange',show);loadTree().then(show);

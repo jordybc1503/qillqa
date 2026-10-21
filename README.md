@@ -1,48 +1,51 @@
 # qillqa
 
-Cuaderno local de páginas anidadas con MCP, web y búsqueda semántica. *Qillqa* significa "escritura" en quechua.
+A local notebook of nested pages with an MCP server, a web UI and local semantic search. *Qillqa* means "writing" in Quechua.
 
-- **Página** = carpeta en `pages/` (o en `QILLQA_PAGES_DIR`) con `index.md` o `index.html`. Sus subcarpetas son subpáginas. También puedes editar los archivos a mano.
+- **Page**: a folder in `pages/` (or `QILLQA_PAGES_DIR`) holding an `index.md` or `index.html`. Its subfolders are subpages, so pages nest to any depth. You can also edit the files by hand.
 - **MCP** (`server.py`, stdio):
-  - Para escribir: `create_page`, `update_page`, `attach_file`, `get_page`, `list_pages`, `move_page`, `delete_page`. Escribe directo en disco; no necesita el servidor.
-  - Para buscar: `search`. Arranca el servidor solo si hace falta.
-  - Para el servidor: `start_server`, `server_status`, `stop_server`.
-- **Web** (`webui.py`): `http://127.0.0.1:47391`, con login por el token de `.env`. Muestra el árbol, las páginas y la búsqueda.
-  - Cada página se muestra aislada (CSP sandbox), así que su JS no puede usar tu sesión.
-  - **Archivos**: fotos, vídeos, audio, PDFs, `.css`, `.js` o cualquier otro archivo van en la carpeta de la página (`attach_file` o a mano). Se referencian con ruta relativa: `![foto](foto.jpg)`, `![demo](clip.mp4)` (vídeo y audio salen con reproductor), `[informe](informe.pdf)`, `<link href="estilo.css">`.
-  - Cada página se sirve en una URL firmada, `/f/<firma>/<carpeta>/`, que solo abre esa carpeta y sus subpáginas. `/view?path=<ruta>` te lleva a ella si tienes sesión.
-- **Búsqueda semántica** con `Qwen/Qwen3-Embedding-0.6B` (local, multilingüe), en la GPU si hay; si no, en CPU con fp32.
-  - El índice vive en `var/index-*.db`. Se actualiza por mtime en dos momentos: en segundo plano tras cada escritura del MCP y antes de cada búsqueda.
-  - El modelo corre en un **proceso hijo** (`embedder.py`) que se cierra tras `QILLQA_MODEL_IDLE_MIN` minutos sin uso, y entonces se libera toda su RAM y VRAM. El servidor web nunca carga torch.
-  - Solo muestra resultados con score ≥ `QILLQA_MIN_SCORE` (0,3, calibrado para este modelo: los aciertos dan 0,41–0,65 y el ruido ≤ 0,21).
+  - Writing: `create_page`, `update_page`, `attach_file`, `get_page`, `list_pages`, `move_page`, `delete_page`. Writes go straight to disk and need no server.
+  - Searching: `search`. Starts the server only if needed.
+  - Server: `start_server`, `server_status`, `stop_server`.
+- **Web UI** (`webui.py`): `http://127.0.0.1:47391`, with sign-in by the token in `.env`. Shows the page tree, the pages and search.
+  - Every page renders sandboxed (CSP sandbox), so its JS cannot use your session.
+  - **Files**: photos, videos, audio, PDFs, `.css`, `.js` and any other file go in the page folder (`attach_file`, or by hand). Reference them by relative path: `![photo](photo.jpg)`, `![demo](clip.mp4)` (video and audio get a player), `[report](report.pdf)`, `<link href="style.css">`.
+  - Every page is served at a signed URL, `/f/<sig>/<folder>/`, which opens only that folder and its subpages. `/view?path=<path>` takes you there when you are signed in.
+- **Semantic search** with `Qwen/Qwen3-Embedding-0.6B` (local, multilingual): on the GPU if there is one, otherwise on the CPU in fp32.
+  - The index lives in `var/index-*.db`. It is updated by mtime at two moments: in the background after every MCP write, and before every search.
+  - The model runs in a **child process** (`embedder.py`) that exits after `QILLQA_MODEL_IDLE_MIN` idle minutes, releasing all of its RAM and VRAM. The web server never loads torch.
+  - Only results scoring at least `QILLQA_MIN_SCORE` are shown. The default of 0.3 is calibrated for this model: real hits score 0.41–0.65 and noise ≤ 0.21.
 
-### Números medidos (RTX 5060 Laptop, WSL)
-| Estado | Tiempo | Memoria |
+### Measured numbers (RTX 5060 Laptop, WSL)
+| State | Time | Memory |
 |---|---|---|
-| Servidor arriba, sin modelo | arranca en 0,5–1 s | 76 MB de RAM, 0 de VRAM |
-| Modelo activo (tras crear o buscar) | carga en frío ~6 s (~19 s la primera vez en la máquina) | +1,7 GB de RAM, 1,36 GB de VRAM |
-| Búsqueda con el modelo cargado | ~30 ms | — |
-| Tras la inactividad | — | vuelve a 77 MB, 0 de VRAM |
-| `stop_server` | 0,5 s | 0 |
+| Server up, no model | starts in 0.5–1 s | 76 MB RAM, 0 VRAM |
+| Model active (after a write or search) | cold load ~6 s (~19 s the very first time on a machine) | +1.7 GB RAM, 1.36 GB VRAM |
+| Search with the model loaded | ~30 ms | — |
+| After the idle timeout | — | back to 77 MB, 0 VRAM |
+| `stop_server` | 0.5 s | 0 |
 
-## Instalar
+## Install
 ```bash
-bash setup.sh                       # venv + torch CPU + deps, .env con token, descarga del modelo
-claude mcp add -s user qillqa -- ~/code/mcp/qillqa/.venv/bin/python ~/code/mcp/qillqa/server.py
+git clone https://github.com/jordybc1503/qillqa && cd qillqa
+bash setup.sh      # venv, torch (CUDA if there is an NVIDIA GPU, CPU otherwise), deps, .env with a token, model download
+claude mcp add -s user qillqa -- "$PWD/.venv/bin/python" "$PWD/server.py"
 ```
-Configuración en `.env` (ver `.env.example`): host, puerto, token, carpeta de páginas, modelo e inactividad.
-Si cambias de modelo se crea un índice nuevo, porque los vectores de modelos distintos no se mezclan.
+Settings live in `.env` (see `.env.example`): host, port, token, pages folder, model, device, idle timeout and minimum score.
+Changing the model creates a new index, because vectors from different models do not mix.
 
-## Acceso desde otros equipos (opcional)
-Con [Tailscale](https://tailscale.com) obtienes un link HTTPS privado, solo para tus dispositivos, sin abrir puertos:
+Your token: `grep QILLQA_TOKEN .env | cut -d= -f2-`
+
+## Access from other devices (optional)
+[Tailscale](https://tailscale.com) gives you a private HTTPS link, reachable only by your own devices, without opening ports:
 ```bash
-sudo tailscale serve --bg 47391        # → https://<maquina>.<red>.ts.net (pide el token igual)
-sudo tailscale serve --https=443 off   # para quitarlo
+sudo tailscale serve --bg 47391        # -> https://<machine>.<tailnet>.ts.net (still asks for the token)
+sudo tailscale serve --https=443 off   # to remove it
 ```
-La primera vez, Tailscale pide activar "Serve" en tu red. Si cambias de puerto, usa el valor de `QILLQA_PORT`.
+The first time, Tailscale asks you to enable "Serve" on your tailnet. If you change the port, use your `QILLQA_PORT` value.
 
-## Probar
+## Test
 ```bash
-.venv/bin/python test_qillqa.py     # checks sin modelo (embedder falso)
-python3 ../_smoke_test.py qillqa    # el MCP arranca y lista sus tools
+.venv/bin/python test_qillqa.py     # checks with a fake embedder, no model needed
+claude mcp list                     # qillqa should show "Connected"
 ```
