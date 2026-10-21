@@ -306,7 +306,9 @@ def _render_md(title: str, text: str) -> str:
                   r'<video controls preload="metadata" src="\2" title="\1"></video>', body, flags=re.I)
     body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_AUDIO}))"\s*/?>',
                   r'<audio controls preload="metadata" src="\2" title="\1"></audio>', body, flags=re.I)
-    return _shell(title, f'<base target="_blank"><article>{body}</article>')
+    # links leave the sandboxed page in a new tab; in-page #anchors stay put
+    body = re.sub(r'<a href="(?!#)', '<a target="_blank" href="', body)
+    return _shell(title, f'<article>{body}</article>')
 
 
 @app.get("/view")

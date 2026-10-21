@@ -135,6 +135,9 @@ page = anon.get(base)
 assert page.status_code == 200 and page.headers["content-security-policy"].startswith("sandbox")
 assert page.headers["referrer-policy"] == "no-referrer"
 assert '<img alt="photo" src="photo.png"' in page.text and '<video controls' in page.text, page.text
+md = webui._render_md("t", "## Part one\n\n[jump](#part-one) [pdf](doc.pdf)")
+assert '<a href="#part-one">' in md and '<a target="_blank" href="doc.pdf">' in md, md
+assert '<base' not in md
 assert anon.get(base + "photo.png").headers["content-type"] == "image/png"
 assert anon.get(base + "drawing.svg").headers["content-security-policy"] == "sandbox"
 assert "content-security-policy" not in anon.get(base + "doc.pdf").headers
