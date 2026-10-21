@@ -90,6 +90,19 @@ hits = webui.search("battery warranty")
 assert hits[0]["path"] == "bikes/warranty", hits
 assert webui.search("zzzz qqqq xxxx") == [], "returned noise below the threshold"
 assert webui._plain("## Part\n\n**Bold** `code` ![img](a.png) [link](b.md)\n```json\n{}\n```") == "Part Bold code img link {}"
+server.write_page("bikesx/other", "# Other\n\nbattery warranty", "md", True)
+webui.sync()
+assert {h["path"] for h in webui.search("battery warranty", path="bikes")} == {"bikes/warranty"}, "scope leaked"
+assert {h["path"] for h in webui.search("battery warranty", path="bikes/")} == {"bikes/warranty"}
+assert "bikesx/other" in {h["path"] for h in webui.search("battery warranty")}
+assert webui.search("battery warranty", path="kitchen") == []
+for bad in ("nope", "../x"):
+    try:
+        webui.search("x", path=bad)
+        raise AssertionError(f"search accepted path {bad!r}")
+    except ValueError:
+        pass
+server._delete("bikesx", True)
 server._move("bikes", "vehicles")
 webui.sync()
 assert {h["path"] for h in webui.search("battery warranty")} >= {"vehicles/warranty"}
@@ -112,6 +125,8 @@ v = c.get("/view?path=kitchen")
 assert v.headers["content-security-policy"].startswith("sandbox"), v.headers
 assert c.get("/view?path=../outside").status_code == 404
 assert c.get("/api/search?q=stir").json()[0]["path"] == "kitchen"
+assert c.get("/api/search?q=stir&path=vehicles").json() == []
+assert c.get("/api/search?q=stir&path=nope").status_code == 404
 
 # attachments and signed files
 server.write_page("project x", "# Project\n\n![photo](photo.png)\n\n![clip](clip.mp4)\n\n[doc](doc.pdf)", "md", True)

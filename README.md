@@ -5,9 +5,10 @@ A local notebook of nested pages with an MCP server, a web UI and local semantic
 - **Page**: a folder in `pages/` (or `QILLQA_PAGES_DIR`) holding an `index.md` or `index.html`. Its subfolders are subpages, so pages nest to any depth. You can also edit the files by hand.
 - **MCP** (`server.py`, stdio):
   - Writing: `create_page`, `update_page`, `attach_file`, `get_page`, `list_pages`, `move_page`, `delete_page`. Writes go straight to disk and need no server.
-  - Searching: `search`. Starts the server only if needed.
+  - Searching: `search`. Pass an optional `path` to search only one folder (every folder can act as a project). Starts the server only if needed.
   - Server: `start_server`, `server_status`, `stop_server`.
 - **Web UI** (`webui.py`): `http://127.0.0.1:47391`, with sign-in by the token in `.env`. Shows the page tree, the pages and search.
+  - Next to the search box, **only in &lt;folder&gt;** limits the search to the folder you are viewing.
   - Every page renders sandboxed (CSP sandbox), so its JS cannot use your session.
   - **Files**: photos, videos, audio, PDFs, `.css`, `.js` and any other file go in the page folder (`attach_file`, or by hand). Reference them by relative path: `![photo](photo.jpg)`, `![demo](clip.mp4)` (video and audio get a player), `[report](report.pdf)`, `<link href="style.css">`.
   - Every page is served at a signed URL, `/f/<sig>/<folder>/`, which opens only that folder and its subpages. `/view?path=<path>` takes you there when you are signed in.

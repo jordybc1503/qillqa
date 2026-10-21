@@ -168,10 +168,17 @@ def _plain(md: str) -> str:
     return re.sub(r"\s+", " ", md.replace("**", "").replace("`", "").replace("|", " ")).strip()
 
 
-def search(q: str, limit: int = 10) -> list[dict]:
+def search(q: str, limit: int = 10, path: str = "") -> list[dict]:
+    """`path` limits the search to that folder (a project) and everything under it."""
+    root = _safe(path)
+    if not root.is_dir():
+        raise ValueError(f"does not exist: {path!r}")
+    root = _rel(root)
     sync()
     with contextlib.closing(_db()) as con:
         rows = con.execute("select path, text, vec from chunks").fetchall()
+    if root:
+        rows = [r for r in rows if r[0] == root or r[0].startswith(root + "/")]
     if not rows or not q.strip():
         return []
     # ponytail: fuerza bruta en numpy; pasar a sqlite-vec si supera ~100k chunks
@@ -280,8 +287,11 @@ def api_sync():
 
 
 @app.get("/api/search")
-def api_search(q: str = "", limit: int = 10):
-    return search(q, max(1, min(limit, 50)))
+def api_search(q: str = "", limit: int = 10, path: str = ""):
+    try:
+        return search(q, max(1, min(limit, 50)), path)
+    except ValueError as e:
+        _bad(e)
 
 
 # ---------------------------------------------------------------- archivos
@@ -410,6 +420,7 @@ def _shell(title: str, body: str) -> str:
 INDEX = """
 <header><a href="#" class="brand">qillqa</a>
 <input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
+<label id="scope" hidden title="Search only this folder and its subpages"><input type="checkbox" id="only"> only in <b id="scopename"></b></label>
 <a href="/logout" class="out">sign out</a></header>
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
@@ -421,6 +432,8 @@ border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),v
 .brand{font-weight:800;font-size:1.15em;text-decoration:none;background:linear-gradient(90deg,var(--c2),var(--c3));
 -webkit-background-clip:text;background-clip:text;color:transparent}
 #q{flex:1;min-width:0;background:var(--bg)}#q:focus{outline:2px solid var(--c3);background:#fff}.out{color:var(--mute);font-size:.9em}
+#scope{font-size:.85em;color:var(--mute);white-space:nowrap;max-width:30vw;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+#scope b{color:var(--c1)}#scope input{accent-color:var(--c3);vertical-align:middle}
 main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 62px)}
 aside{background:#fbfcff;border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
 nav ul{list-style:none;margin:0;padding-left:14px}nav>ul{padding-left:0}
@@ -435,7 +448,8 @@ section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;wi
 .hit{display:block;padding:10px 12px;margin:6px 0;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none}
 .hit:hover{border-color:var(--c3);background:color-mix(in srgb,var(--c3) 5%,#fff)}
 .hit b{color:var(--c3)}.hit small{color:var(--c1);display:block}
-@media (max-width:760px){main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
+@media (max-width:760px){header{flex-wrap:wrap}#scope{order:3;max-width:100%}
+main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
 #toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
 nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
 </style>
@@ -454,8 +468,10 @@ function renderTree(nodes){
 async function loadTree(){$('#tree').replaceChildren(renderTree(await api('/api/tree')));mark()}
 function mark(){const p=decodeURIComponent(location.hash.slice(1));
   document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.path===p))}
+let scope='';
 async function show(){
   const p=decodeURIComponent(location.hash.slice(1));mark();
+  if(!scope){$('#scopename').textContent=p;$('#scope').hidden=!p}
   if(!p){$('#page').hidden=true;$('#empty').hidden=false;$('#crumb').textContent='';return}
   $('#crumb').textContent=p.split('/').join(' / ');$('#empty').hidden=true;$('#page').hidden=false;
   $('#page').src='/view?path='+encodeURIComponent(p);$('nav').classList.remove('open');
@@ -466,11 +482,12 @@ async function find(){
   const q=$('#q').value.trim(),box=$('#results');
   if(!q){box.hidden=true;return}
   box.hidden=false;box.replaceChildren(mk('small',{textContent:'Searching… (the first search loads the model)'}));
-  const hits=await api('/api/search?q='+encodeURIComponent(q));
+  const hits=await api('/api/search?q='+encodeURIComponent(q)+(scope?'&path='+encodeURIComponent(scope):''));
   box.replaceChildren(...(hits.length?hits.map(h=>mk('a',{className:'hit',href:'#'+h.path},
     mk('b',{textContent:h.title}),mk('small',{textContent:h.path+' · '+h.score}),
-    mk('span',{textContent:h.snippet}))):[mk('small',{textContent:'No results'})]));
+    mk('span',{textContent:h.snippet}))):[mk('small',{textContent:scope?'No results in '+scope:'No results'})]));
 }
+$('#only').onchange=()=>{scope=$('#only').checked?decodeURIComponent(location.hash.slice(1)):'';show();find()};
 $('#toggle').onclick=()=>$('nav').classList.toggle('open');
 addEventListener('hashchange',show);loadTree().then(show);
 </script>"""

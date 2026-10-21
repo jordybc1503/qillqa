@@ -19,6 +19,7 @@ import signal
 import subprocess
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -209,13 +210,16 @@ def stop() -> dict:
     return {"running": _health()}
 
 
-def _search(query: str, limit: int) -> list[dict]:
+def _search(query: str, limit: int, path: str = "") -> list[dict]:
     start()
-    q = urllib.parse.urlencode({"q": query, "limit": limit})
+    q = urllib.parse.urlencode({"q": query, "limit": limit, "path": path})
     req = urllib.request.Request(f"{URL}/api/search?{q}",
                                  headers={"Authorization": f"Bearer {TOKEN}"})
-    with urllib.request.urlopen(req, timeout=900) as r:  # first call: loads the model and indexes
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=900) as r:  # first call: loads the model and indexes
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        raise ValueError(json.load(e).get("detail", str(e))) from None
 
 
 def _reindex() -> None:
@@ -288,11 +292,13 @@ def list_pages(path: str = "") -> str:
 
 
 @mcp.tool()
-def search(query: str, limit: int = 10) -> str:
-    """Semantic search (by meaning, in any language) across all qillqa pages.
-    Starts the local server if needed; the first call takes a few seconds to
-    load the model and index."""
-    return _dump(_search, query, limit)
+def search(query: str, limit: int = 10, path: str = "") -> str:
+    """Semantic search (by meaning, in any language) across qillqa pages.
+    Every folder can act as a project: pass `path` (e.g. 'agent-trez') to
+    search only that folder and everything under it; leave it empty to search
+    the whole notebook. Starts the local server if needed; the first call
+    takes a few seconds to load the model and index."""
+    return _dump(_search, query, limit, path)
 
 
 @mcp.tool()
