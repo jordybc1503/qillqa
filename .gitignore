@@ -1,0 +1,6 @@
+.venv/
+.env
+var/
+__pycache__/
+pages/
+progress.md
