@@ -395,37 +395,55 @@ class _Kinds(HTMLParser):
         self.kinds: dict[int, str] = {}
         self.stack: list[str] = []
         self.li_text: list[bool] = []  # per open <li>: has text come before?
+        self.cells: list[str] | None = None  # cell texts of the open <tr>
+        self.boxed = False  # the open <tr> holds a row box
+        self.rows: list[tuple[str, ...]] = []  # cell texts of every row that holds a box
 
     def handle_starttag(self, tag, attrs):
         if tag not in _VOID:
             self.stack.append(tag)
             if tag == "li":
                 self.li_text.append(False)
+            elif tag == "tr":
+                self.cells, self.boxed = [], False
+            elif tag in ("td", "th") and self.cells is not None:
+                self.cells.append("")
 
     def handle_endtag(self, tag):
         while tag in self.stack:
             t = self.stack.pop()
             if t == "li":
                 self.li_text.pop()
+            elif t == "tr" and self.cells is not None:
+                if self.boxed:
+                    self.rows.append(tuple(c.strip() for c in self.cells))
+                self.cells = None
             if t == tag:
                 break
 
     def handle_data(self, data):
         code = "code" in self.stack or "pre" in self.stack
+        if self.cells:
+            self.cells[-1] += _MARK.sub(lambda m: m.group(2), data)
         for k, piece in enumerate(_MARK.split(data)):
             if k % 3 == 1 and not code:  # split yields text, number, box, text, ...
                 if "td" in self.stack and "tbody" in self.stack:
                     self.kinds[int(piece)] = "row"
+                    self.boxed = True
                 elif self.li_text and not self.li_text[-1] and self.stack[-1] in ("li", "p"):
                     self.kinds[int(piece)] = "item"
             if k % 3 != 1 and piece.strip() and self.li_text:
                 self.li_text[-1] = True
 
 
-def _kinds(text: str) -> dict[int, str]:
+def _parse(text: str) -> _Kinds:
     p = _Kinds()
     p.feed(_md(_mark(text)))
-    return p.kinds
+    return p
+
+
+def _kinds(text: str) -> dict[int, str]:
+    return _parse(text).kinds
 
 
 _EOL = re.compile(r"\r\n|\r|\n")  # markdown ends a line at any of these
@@ -433,10 +451,6 @@ _EOL = re.compile(r"\r\n|\r|\n")  # markdown ends a line at any of these
 
 def _line_of(text: str, pos: int) -> int:
     return len(_EOL.findall(text, 0, pos))
-
-
-def _cells(line: str) -> int:
-    return len(re.split(r"(?<!\\)\|", line.strip().strip("|")))
 
 
 def _movable(text: str, kinds: dict[int, str]) -> set[int]:
@@ -463,19 +477,22 @@ def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: boo
     if i not in movable or to not in movable:
         raise ValueError("only markdown table rows move")
     lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", text)
-    eol = (_EOL.search(text) or re.match("", "")).group() or "\n"
     trimmed = bool(lines) and not lines[-1].endswith(("\n", "\r"))
-    if trimmed:
-        lines[-1] += eol
+    if trimmed:  # give the last line its neighbour's ending while it moves around
+        lines[-1] += _EOL.search(lines[-2]).group() if len(lines) > 1 else "\n"
     src, dst = _line_of(text, boxes[i].start()), _line_of(text, boxes[to].start())
-    if _cells(lines[src]) != _cells(lines[dst]):
-        raise ValueError("those tables have different columns")
     if src != dst:
         row = lines.pop(src)
         dst -= src < dst
         lines.insert(dst + 1 if after else dst, row)
     out = "".join(lines)
-    return out[:-len(eol)] if trimmed else out
+    if trimmed:  # the file had no final line ending: drop whichever one is last now
+        out = re.sub(r"(\r\n|\r|\n)\Z", "", out)
+    # whatever the source looked like, every boxed row must render with exactly the same
+    # cells after the move (another column count, a raw html cell, a \\| ... would change them)
+    if sorted(_parse(out).rows) != sorted(_parse(text).rows):
+        raise ValueError("that row would change in that table (different columns?)")
+    return out
 
 
 def _grant(page: str, version: str) -> str:

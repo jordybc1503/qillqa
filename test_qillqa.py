@@ -281,6 +281,18 @@ except ValueError:
 cr = "a|b\n---|---\n☐|one\r☐|two\n☐|three\n"
 assert e(cr, "move", 0, to=2, after=True) == "a|b\n---|---\n☐|two\n☐|three\n☐|one\r", repr(e(cr, "move", 0, to=2, after=True))
 
+# round 3: mixed line endings keep every character; a \\| or a pipe inside a raw html cell
+# cannot make a row lose or merge cells
+mixed = "a|b\r\n-|-\n☐|one\n☐|two"
+assert e(mixed, "move", 0, to=1, after=True) == "a|b\r\n-|-\n☐|two\n☐|one", repr(e(mixed, "move", 0, to=1, after=True))
+for src in ("a|b|c\n-|-|-\n☐|x\\\\|KEEP\n\na|b\n-|-\n☐|y\n",
+            "<table><tbody><tr><td>\n☐ one | detail\n</td></tr><tr><td>\n☐ two | detail\n</td></tr></tbody></table>"):
+    try:
+        e(src, "move", 0, to=1, after=True)
+        raise AssertionError(f"moved a row that would change: {src!r}")
+    except ValueError:
+        pass
+
 # an MCP write racing a checklist edit: the shared lock makes the edit see it (409), never drop it
 import threading as _th  # noqa: E402
 cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)
