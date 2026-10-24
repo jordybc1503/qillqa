@@ -12,6 +12,7 @@ A local notebook of nested pages with an MCP server, a web UI and local semantic
   - Every page renders sandboxed (CSP sandbox), so its JS cannot use your session.
   - **Files**: photos, videos, audio, PDFs, `.css`, `.js` and any other file go in the page folder (`attach_file`, or by hand). Reference them by relative path: `![photo](photo.jpg)`, `![demo](clip.mp4)` (video and audio get a player), `[report](report.pdf)`, `<link href="style.css">`.
   - Every page is served at a signed URL, `/f/<sig>/<folder>/`, which opens only that folder and its subpages. `/view?path=<path>` takes you there when you are signed in.
+  - **Checklists**: in a markdown page, a `☐`, `☑` or `◐` in a table row, or at the start of a list item (`- ☐ …`), is a box you can click. A table row that holds a box also gets a ⠿ grip: drag it to another place or into another table (for example from "To do" to "Done"); the page scrolls by itself near the edges. Every change is saved to the page's `index.md` (`POST /api/page/edit`), which stays the source of truth. Each render carries its own capability (bound to that page and that version of the file): if the file changed since the page loaded, the change is refused and the page reloads, and no other document in the frame can edit. The MCP and the web UI write under one shared file lock, so neither loses the other's write. Line endings are kept. A box inside a sentence or a code block stays text. Give the tables of one page the same columns so a row fits wherever it lands. These pages run only a script carrying the page's nonce; a `<script>` written in the markdown never runs.
 - **Semantic search** with `Qwen/Qwen3-Embedding-0.6B` (local, multilingual): on the GPU if there is one, otherwise on the CPU in fp32.
   - The index lives in `var/index-*.db`. It is updated by mtime at two moments: in the background after every MCP write, and before every search.
   - The model runs in a **child process** (`embedder.py`) that exits after `QILLQA_MODEL_IDLE_MIN` idle minutes, releasing all of its RAM and VRAM. The web server never loads torch.
@@ -48,5 +49,6 @@ The first time, Tailscale asks you to enable "Serve" on your tailnet. If you cha
 ## Test
 ```bash
 .venv/bin/python test_qillqa.py     # checks with a fake embedder, no model needed
+python test_browser.py              # checklists in Chromium (any python with playwright; skips without it)
 claude mcp list                     # qillqa should show "Connected"
 ```

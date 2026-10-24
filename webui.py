@@ -14,7 +14,9 @@ import html
 import multiprocessing
 import os
 import re
+import secrets
 import sqlite3
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -23,11 +25,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import markdown
+from markdown.extensions.toc import slugify
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 import embedder
+import server
 from server import MODEL, PAGES, TOKEN, VAR, _index, _rel, _safe, _title, read_page, tree
 
 IDLE_MIN = float(os.environ.get("QILLQA_MODEL_IDLE_MIN", "15"))
@@ -286,6 +290,39 @@ def api_sync():
     return {"ok": True}
 
 
+@app.post("/api/page/edit")
+async def api_page_edit(req: Request):
+    """Checklist edit from the shell: {path, op: check|move, i, to?, after?, cap}. `cap` comes
+    from one render of that page; 409 if the file changed since, so a stale page never overwrites."""
+    if not req.headers.get("content-type", "").startswith("application/json"):
+        raise HTTPException(415, "json only")
+    d = await req.json()
+    try:
+        page = _safe(str(d.get("path", "")))
+        idx = _index(page) if page != PAGES else None
+        if not idx or idx.suffix != ".md":
+            raise ValueError("not a markdown page")
+        with _edit_lock:
+            granted = _caps.get(str(d.get("cap", "")))
+        if not granted or granted[0] != _rel(page):
+            raise HTTPException(403, "this page did not render that checklist")
+        with server.page_lock():
+            text = _read_raw(idx)
+            if granted[1] != _version(text):
+                return JSONResponse({"error": "the page changed, reloaded"}, status_code=409)
+            new = edit_checklist(text, str(d.get("op")), int(d.get("i", -1)),
+                                 None if d.get("to") is None else int(d["to"]), bool(d.get("after")),
+                                 None if d.get("line") is None else int(d["line"]))
+            fd, tmp = tempfile.mkstemp(dir=idx.parent, prefix=".edit-", suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(new.encode())
+            os.replace(tmp, idx)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    threading.Thread(target=sync, daemon=True).start()
+    return {"ok": True}
+
+
 @app.get("/api/search")
 def api_search(q: str = "", limit: int = 10, path: str = ""):
     try:
@@ -311,13 +348,296 @@ def signed_url(rel: str) -> str:
 
 _HTML_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals"
 _MD_SANDBOX = "sandbox allow-popups allow-popups-to-escape-sandbox"
+_MD_LIVE_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
 _SAFE_HEADERS = {"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 _VIDEO = r"mp4|webm|mov|m4v"
 _AUDIO = r"mp3|wav|m4a|ogg|flac|opus"
 
 
-def _render_md(title: str, text: str) -> str:
-    body = markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
+# ---------------------------------------------------------------- checklists
+# A markdown page with ☐/☑/◐ in a table row, or at the start of a list item, is a
+# checklist: click a box to flip it, drag a row by its ⠿ grip to another place or
+# another table. The md file stays the source of truth: the sandboxed page posts
+# the change to the shell (which has the session), the shell calls
+# POST /api/page/edit, the page reloads at the same scroll.
+# Which boxes are clickable is read from markdown's own html (every box in the
+# source is numbered first), so a ☐ in a sentence, a link or a code block stays text.
+# Each render gets a capability (its CSP nonce) bound to that page and that version
+# of the file: a stale page or another document in the iframe cannot edit.
+
+BOXES = "☐☑◐"
+_BOX = re.compile(f"[{BOXES}]")
+_PUA = re.compile("[\ue000-\ue004]")
+_HDR = re.compile("\ue003(\\d+)\ue004")  # header row of a table: its separator line
+_MARK = re.compile(f"\ue000(\\d+)\ue001([{BOXES}])\ue002")
+_VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+_caps: dict[str, tuple[str, str]] = {}  # capability -> (page, version); newest last
+_edit_lock = threading.Lock()
+
+
+def _version(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def _slugify(value: str, separator: str) -> str:
+    """Heading ids as if there were no box numbers or header tags in the text."""
+    return slugify(_HDR.sub("", _MARK.sub(lambda m: m.group(2), value)), separator)
+
+
+def _md(text: str) -> str:
+    return markdown.markdown(text.replace("\r\n", "\n"), extensions=["fenced_code", "tables", "toc", "sane_lists"],
+                             extension_configs={"toc": {"slugify": _slugify}})
+
+
+def _mark(text: str, headers: set[int] | None = None) -> str:
+    """Number every box in the source (a literal marker char in the source is dropped);
+    with `headers`, also tag those table header lines (see _headers)."""
+    n, text = iter(range(1 << 30)), _PUA.sub("", text)
+    return _BOX.sub(lambda m: f"\ue000{next(n)}\ue001{m.group()}\ue002",
+                    _headers(text, headers) if headers else text)
+
+
+class _Kinds(HTMLParser):
+    """Box number -> 'row' (in a table body cell) or 'item' (first thing in a list item).
+    Boxes in code, attributes or the middle of a sentence get no entry."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.kinds: dict[int, str] = {}
+        self.stack: list[str] = []
+        self.li_text: list[bool] = []  # per open <li>: has text come before?
+        self.md_table: list[bool] = []  # per open <table>: built by markdown (its header is tagged)
+        self.cells: list[str] | None = None  # cell texts of the open <tr>
+        self.boxed = False  # the open <tr> holds a row box
+        self.rows: list[tuple[str, ...]] = []  # cell texts of every row that holds a box
+
+    def handle_starttag(self, tag, attrs):
+        if self.cells and tag not in ("td", "th", "tr"):
+            self.cells[-1] += self.get_starttag_text()  # an image or link is part of the cell
+        if tag not in _VOID:
+            self.stack.append(tag)
+            if tag == "li":
+                self.li_text.append(False)
+            elif tag == "table":
+                self.md_table.append(False)
+            elif tag == "tr":
+                self.cells, self.boxed = [], False
+            elif tag in ("td", "th") and self.cells is not None:
+                self.cells.append("")
+
+    def handle_endtag(self, tag):
+        if self.cells and tag not in ("td", "th", "tr"):
+            self.cells[-1] += f"</{tag}>"
+        while tag in self.stack:
+            t = self.stack.pop()
+            if t == "li":
+                self.li_text.pop()
+            elif t == "table" and self.md_table:
+                self.md_table.pop()
+            elif t == "tr" and self.cells is not None:
+                if self.boxed:
+                    self.rows.append(tuple(c.strip() for c in self.cells))
+                self.cells = None
+            if t == tag:
+                break
+
+    def handle_data(self, data):
+        code = "code" in self.stack or "pre" in self.stack
+        if "th" in self.stack and self.md_table and _HDR.search(data):
+            self.md_table[-1] = True
+        if self.cells:
+            self.cells[-1] += _HDR.sub("", _MARK.sub(lambda m: m.group(2), data))
+        for k, piece in enumerate(_MARK.split(data)):
+            if k % 3 == 1 and not code:  # split yields text, number, box, text, ...
+                if "td" in self.stack and "tbody" in self.stack:
+                    md = bool(self.md_table) and self.md_table[-1]
+                    self.kinds[int(piece)] = "row" if md else "cell"  # a raw <table> cell clicks, never moves
+                    self.boxed = True
+                elif self.li_text and not self.li_text[-1] and self.stack[-1] in ("li", "p"):
+                    self.kinds[int(piece)] = "item"
+            if k % 3 != 1 and piece.strip() and self.li_text:
+                self.li_text[-1] = True
+
+
+def _html(text: str) -> str:
+    """Markdown with numbered boxes and tagged table headers. A header tag that would change
+    how the page renders is left out (that table then gets no drop target and no grips)."""
+    plain = _md(_mark(text))
+    clean = lambda tags: _HDR.sub("", _md(_mark(text, tags))) == plain  # noqa: E731
+    ok = {n for n in _header_lines(_PUA.sub("", text)) if clean({n})}
+    tagged = _md(_mark(text, ok)) if ok else plain
+    return tagged if _HDR.sub("", tagged) == plain else plain
+
+
+def _parse(text: str) -> _Kinds:
+    p = _Kinds()
+    p.feed(_html(text))
+    return p
+
+
+def _kinds(text: str) -> dict[int, str]:
+    return _parse(text).kinds
+
+
+_EOL = re.compile(r"\r\n|\r|\n")  # markdown ends a line at any of these
+
+
+def _line_of(text: str, pos: int) -> int:
+    return len(_EOL.findall(text, 0, pos))
+
+
+def _movable(text: str, kinds: dict[int, str]) -> set[int]:
+    """Boxes in rows of tables markdown built (see _Kinds); those rows move."""
+    return {i for i, k in kinds.items() if k == "row"}
+
+
+_SEPLINE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
+
+
+def _header_lines(text: str) -> list[int]:
+    """Separator lines of pipe-table candidates (markdown has the final word, see _html)."""
+    lines = _EOL.split(text)
+    return [n for n in range(1, len(lines)) if _SEPLINE.match(lines[n]) and "|" in lines[n - 1]]
+
+
+def _headers(text: str, only: set[int] | None = None) -> str:
+    """Tag the header line of each pipe table (or of those in `only`) with its separator's
+    line number (\ue003n\ue004), inside the first cell: after a list marker, pipe and spaces."""
+    lines, seps = _EOL.split(text), _EOL.findall(text) + [""]
+    for n in _header_lines(text):
+        if only is None or n in only:
+            h = lines[n - 1]
+            k = re.match(r"\s*(?:(?:[-*+]|\d+[.)])\s+)?\|?[ \t]*", h).end()
+            lines[n - 1] = f"{h[:k]}\ue003{n}\ue004{h[k:]}"
+    return "".join(a + b for a, b in zip(lines, seps))
+
+
+def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: bool = False,
+                   line: int | None = None) -> str:
+    """'check' flips box i (☑ -> ☐, else -> ☑). 'move' puts the table row holding box i
+    before/after the row holding box `to`, or, with `line` (a table's separator line), first
+    in that table, even an empty one. Line endings are kept. Raises ValueError."""
+    boxes, kinds = list(_BOX.finditer(text)), _kinds(text)
+    if i not in kinds:
+        raise ValueError("no such box")
+    if op == "check":
+        m = boxes[i]
+        return text[:m.start()] + ("☐" if m.group() == "☑" else "☑") + text[m.end():]
+    if op != "move":
+        raise ValueError("unknown op")
+    movable = _movable(text, kinds)
+    if i not in movable or (line is None and to not in movable):
+        raise ValueError("only markdown table rows move")
+    lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", text)
+    trimmed = bool(lines) and not lines[-1].endswith(("\n", "\r"))
+    if trimmed:  # give the last line its neighbour's ending while it moves around
+        lines[-1] += _EOL.search(lines[-2]).group() if len(lines) > 1 else "\n"
+    src = _line_of(text, boxes[i].start())
+    if line is not None:  # first row of the table whose separator is `line`
+        if not (0 < line < len(lines) and _SEPLINE.match(lines[line].rstrip("\r\n"))):
+            raise ValueError("no table there")
+        dst, after = line, True
+    else:
+        dst = _line_of(text, boxes[to].start())
+    if src != dst:
+        row = lines.pop(src)
+        dst -= src < dst
+        lines.insert(dst + 1 if after else dst, row)
+    out = "".join(lines)
+    if trimmed:  # the file had no final line ending: drop whichever one is last now
+        out = re.sub(r"(\r\n|\r|\n)\Z", "", out)
+    # whatever the source looked like, every boxed row must render with exactly the same
+    # cells after the move (another column count, a raw html cell, a \\| ... would change them),
+    # and the rest of the page must render exactly as before (joined line endings, ...)
+    if sorted(_parse(out).rows) != sorted(_parse(text).rows) or _rest(out) != _rest(text):
+        raise ValueError("that row would change in that table (different columns?)")
+    return out
+
+
+def _rest(text: str) -> str:
+    """The rendered page without the rows that hold a box (box numbers dropped)."""
+    html_ = re.sub(r"<tr>(?:(?!</tr>).)*?\ue000.*?</tr>\s*", "", _md(_mark(text)), flags=re.S)
+    html_ = re.sub(r"<tr>(?:\s*<td[^>]*>\s*</td>)+\s*</tr>\s*", "", html_)  # an emptied table's filler row
+    return _MARK.sub(lambda m: m.group(2), html_)
+
+
+def _grant(page: str, version: str) -> str:
+    """A capability for one render of one page at one version."""
+    cap = secrets.token_urlsafe(16)
+    with _edit_lock:
+        _caps[cap] = (page, version)
+        while len(_caps) > 500:
+            _caps.pop(next(iter(_caps)))
+    return cap
+
+
+def _read_raw(idx: Path) -> str:
+    return idx.read_bytes().decode("utf-8", "replace")  # no newline translation
+
+
+_CHECK_JS = """(()=>{
+const cap=document.querySelector('article').dataset.cap,m=location.hash.match(/^#qy=(\\d+)$/);
+if(m)addEventListener('load',()=>scrollTo(0,+m[1]));
+const send=d=>parent.postMessage(Object.assign({cap,y:Math.round(scrollY)},d),'*');
+document.addEventListener('click',e=>{const b=e.target.closest('button.cb');if(b)send({qillqa:'check',i:+b.dataset.i})});
+let drag=null,pid=null,over=null,after=false,x=0,y=0,raf=0;
+const box=tr=>tr&&tr.querySelector('.grip')&&tr.querySelector('button.cb'),hdr=tr=>tr&&tr.querySelector('.hdr');
+function mark(){if(over)over.classList.remove('drop-before','drop-after');
+  const t=document.elementFromPoint(x,y);over=t&&t.closest('tr');
+  if(over===drag||!(box(over)||hdr(over))){over=null;return}
+  const r=over.getBoundingClientRect();after=!!hdr(over)||y>r.top+r.height/2;over.classList.add(after?'drop-after':'drop-before')}
+function tick(){const z=80;if(y<z)scrollBy(0,-(z-y)/3);else if(y>innerHeight-z)scrollBy(0,(y-innerHeight+z)/3);
+  mark();raf=requestAnimationFrame(tick)}
+function end(ok,e){if(!drag||e.pointerId!==pid)return;cancelAnimationFrame(raf);drag.classList.remove('dragging');
+  if(over)over.classList.remove('drop-before','drop-after');
+  if(ok&&over)send(hdr(over)?{qillqa:'move',i:+box(drag).dataset.i,line:+hdr(over).dataset.l}
+    :{qillqa:'move',i:+box(drag).dataset.i,to:+box(over).dataset.i,after});drag=over=pid=null}
+document.addEventListener('pointerdown',e=>{const g=e.target.closest('.grip');if(!g||drag)return;e.preventDefault();
+  pid=e.pointerId;drag=g.closest('tr');x=e.clientX;y=e.clientY;drag.classList.add('dragging');
+  try{g.setPointerCapture(e.pointerId)}catch(_){}tick()});
+document.addEventListener('pointermove',e=>{if(drag&&e.pointerId===pid){x=e.clientX;y=e.clientY}});
+document.addEventListener('pointerup',e=>end(true,e));document.addEventListener('pointercancel',e=>end(false,e));
+})();"""
+
+_CHECK_CSS = """<style>
+button.cb{all:unset;cursor:pointer;font-size:1.3em;line-height:1;padding:2px 4px;border-radius:6px}
+button.cb:hover,button.cb:focus-visible{background:color-mix(in srgb,var(--c3) 15%,#fff);outline:2px solid var(--c3)}
+.grip{cursor:grab;touch-action:none;user-select:none;color:var(--mute);padding:2px 6px 2px 0;font-size:1.2em}
+td:has(>.grip){white-space:nowrap}
+tr.dragging td{opacity:.45}tr.drop-before :is(td,th){box-shadow:inset 0 3px 0 var(--c2)}tr.drop-after :is(td,th){box-shadow:inset 0 -3px 0 var(--c2)}
+</style>"""
+
+
+def _render_md(title: str, text: str, cap: str = "", nonce: str = "") -> str:
+    """With a capability and a nonce, boxes markdown put in table rows / list items are live."""
+    kinds = _kinds(text) if cap else {}
+    if kinds:
+        rows: dict[int, int] = {}  # source line -> its first box: that one gets the grip
+        movable = _movable(text, kinds)
+        for i, m in enumerate(_BOX.finditer(text)):
+            if i in movable:
+                rows.setdefault(_line_of(text, m.start()), i)
+        grips = set(rows.values())
+
+        def live(m):
+            i = int(m.group(1))
+            if i not in kinds:
+                return m.group(2)
+            g = '<span class="grip" title="Drag to move">⠿</span>' if i in grips else ""
+            return f'{g}<button class="cb" data-i="{i}" title="Click to mark">{m.group(2)}</button>'
+        parts = re.split(r"(<[^>]*>)", _html(text))  # markers inside a tag are just the glyph
+        body, in_th = [], False
+        for p in parts:
+            if p.startswith("<"):
+                in_th = p.startswith("<th") or (in_th and not p.startswith("</th"))
+                body.append(_HDR.sub("", _MARK.sub(lambda m: m.group(2), p)))
+            else:
+                hdr = (lambda m: f'<span class="hdr" data-l="{m.group(1)}"></span>') if in_th else ""
+                body.append(_HDR.sub(hdr, _MARK.sub(live, p)))
+        body = "".join(body)
+        body = _CHECK_CSS + body + f'<script nonce="{nonce}">{_CHECK_JS}</script>'
+    else:
+        body = _md(text)
     # ![x](clip.mp4) -> video / audio player
     body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_VIDEO}))"\s*/?>',
                   r'<video controls preload="metadata" src="\2" title="\1"></video>', body, flags=re.I)
@@ -325,7 +645,9 @@ def _render_md(title: str, text: str) -> str:
                   r'<audio controls preload="metadata" src="\2" title="\1"></audio>', body, flags=re.I)
     # links leave the sandboxed page in a new tab; in-page #anchors stay put
     body = re.sub(r'<a href="(?!#)', '<a target="_blank" href="', body)
-    return _shell(title, f'<article>{body}</article>')
+    body = body.replace("<table>", '<div class="tw"><table>').replace("</table>", "</table></div>")
+    attr = f' data-cap="{cap}"' if kinds else ""
+    return _shell(title, f'<article{attr}>{body}</article>')
 
 
 @app.get("/view")
@@ -360,12 +682,16 @@ def signed_file(sig: str, rest: str, req: Request):
         idx = _index(target)
         if not idx:
             _bad(ValueError("no page here"))
-        text = idx.read_text(errors="replace")
-        html_page = idx.suffix == ".html"
-        return Response(text if html_page else _render_md(_title(target), text),
-                        media_type="text/html; charset=utf-8",
-                        headers={**_SAFE_HEADERS, "Cache-Control": "no-store",
-                                 "Content-Security-Policy": _HTML_SANDBOX if html_page else _MD_SANDBOX})
+        text = _read_raw(idx)
+        if idx.suffix == ".html":
+            body, csp = text, _HTML_SANDBOX
+        elif _kinds(text):  # checklist: only our nonce'd script runs, never raw <script> in the md
+            nonce, cap = secrets.token_urlsafe(16), _grant(_rel(target), _version(text))
+            body, csp = _render_md(_title(target), text, cap, nonce), f"{_MD_LIVE_SANDBOX}; script-src 'nonce-{nonce}'"
+        else:
+            body, csp = _render_md(_title(target), text), _MD_SANDBOX
+        return Response(body, media_type="text/html; charset=utf-8",
+                        headers={**_SAFE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": csp})
     if not target.is_file():
         _bad(ValueError("not found"))
     r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private"})
@@ -398,6 +724,7 @@ blockquote{margin:1em 0;padding:10px 16px;background:#ecf8f6;border-left:4px sol
 blockquote p{margin:.4em 0}
 table{border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:1em 0}
 th{background:linear-gradient(90deg,var(--c1),var(--c3));color:#fff;text-align:left;font-weight:600}
+.tw{overflow-x:auto;margin:1em 0}.tw table{margin:0}
 td,th{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}
 tbody tr:nth-child(even) td{background:#f7f8fe}
 hr{border:0;height:3px;background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));border-radius:3px}
@@ -489,6 +816,17 @@ async function find(){
 }
 $('#only').onchange=()=>{scope=$('#only').checked?decodeURIComponent(location.hash.slice(1)):'';show();find()};
 $('#toggle').onclick=()=>$('nav').classList.toggle('open');
+// checklist pages post {qillqa: check|move} here; only the shown page, only its own iframe
+addEventListener('message',async e=>{
+  const f=$('#page'),d=e.data,p=decodeURIComponent(location.hash.slice(1));
+  if(e.source!==f.contentWindow||!d||!['check','move'].includes(d.qillqa)||!p)return;
+  const r=await fetch('/api/page/edit',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({path:p,op:d.qillqa,i:d.i,to:d.to,line:d.line,after:!!d.after,cap:d.cap})});
+  if(r.status===401){location='/login';return}
+  if(decodeURIComponent(location.hash.slice(1))!==p)return;  // navigated away meanwhile
+  if(!r.ok&&r.status!==409)$('#crumb').textContent='⚠ '+((await r.json()).detail||r.status);
+  f.src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()+'#qy='+(d.y|0);
+});
 addEventListener('hashchange',show);loadTree().then(show);
 </script>"""
 

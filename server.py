@@ -11,6 +11,9 @@ the MCP handshake and webui.py imports it.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import functools
 import json
 import os
 import re
@@ -122,6 +125,25 @@ def attach(path: str, source: str, name: str = "") -> dict:
     return {"page": _rel(d), "file": name, "markdown": md}
 
 
+@contextlib.contextmanager
+def page_lock():
+    """One page writer at a time across processes: this MCP server and the web UI's
+    checklist edits read-check-write under it, so neither loses the other's write."""
+    VAR.mkdir(parents=True, exist_ok=True)
+    with open(VAR / "write.lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def run(*a, **k):
+        with page_lock():
+            return fn(*a, **k)
+    return run
+
+
+@_locked
 def write_page(path: str, content: str, fmt: str, create: bool) -> dict:
     if fmt not in ("md", "html"):
         raise ValueError("format must be 'md' or 'html'")
@@ -141,6 +163,7 @@ def write_page(path: str, content: str, fmt: str, create: bool) -> dict:
     return {"path": _rel(d), "title": _title(d), "url": f"{URL}/#{_rel(d)}"}
 
 
+@_locked
 def _move(src: str, dst: str) -> dict:
     s, t = _safe(src), _safe(dst)
     if s == PAGES or not s.is_dir():
@@ -154,6 +177,7 @@ def _move(src: str, dst: str) -> dict:
     return {"path": _rel(t), "url": f"{URL}/#{_rel(t)}"}
 
 
+@_locked
 def _delete(path: str, recursive: bool = False) -> dict:
     d = _safe(path)
     if d == PAGES or not d.is_dir():
