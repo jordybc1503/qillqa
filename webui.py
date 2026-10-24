@@ -398,6 +398,7 @@ class _Kinds(HTMLParser):
         self.kinds: dict[int, str] = {}
         self.stack: list[str] = []
         self.li_text: list[bool] = []  # per open <li>: has text come before?
+        self.md_table: list[bool] = []  # per open <table>: built by markdown (its header is tagged)
         self.cells: list[str] | None = None  # cell texts of the open <tr>
         self.boxed = False  # the open <tr> holds a row box
         self.rows: list[tuple[str, ...]] = []  # cell texts of every row that holds a box
@@ -409,16 +410,22 @@ class _Kinds(HTMLParser):
             self.stack.append(tag)
             if tag == "li":
                 self.li_text.append(False)
+            elif tag == "table":
+                self.md_table.append(False)
             elif tag == "tr":
                 self.cells, self.boxed = [], False
             elif tag in ("td", "th") and self.cells is not None:
                 self.cells.append("")
 
     def handle_endtag(self, tag):
+        if self.cells and tag not in ("td", "th", "tr"):
+            self.cells[-1] += f"</{tag}>"
         while tag in self.stack:
             t = self.stack.pop()
             if t == "li":
                 self.li_text.pop()
+            elif t == "table" and self.md_table:
+                self.md_table.pop()
             elif t == "tr" and self.cells is not None:
                 if self.boxed:
                     self.rows.append(tuple(c.strip() for c in self.cells))
@@ -428,12 +435,15 @@ class _Kinds(HTMLParser):
 
     def handle_data(self, data):
         code = "code" in self.stack or "pre" in self.stack
+        if "th" in self.stack and self.md_table and _HDR.search(data):
+            self.md_table[-1] = True
         if self.cells:
-            self.cells[-1] += _MARK.sub(lambda m: m.group(2), data)
+            self.cells[-1] += _HDR.sub("", _MARK.sub(lambda m: m.group(2), data))
         for k, piece in enumerate(_MARK.split(data)):
             if k % 3 == 1 and not code:  # split yields text, number, box, text, ...
                 if "td" in self.stack and "tbody" in self.stack:
-                    self.kinds[int(piece)] = "row"
+                    md = bool(self.md_table) and self.md_table[-1]
+                    self.kinds[int(piece)] = "row" if md else "cell"  # a raw <table> cell clicks, never moves
                     self.boxed = True
                 elif self.li_text and not self.li_text[-1] and self.stack[-1] in ("li", "p"):
                     self.kinds[int(piece)] = "item"
@@ -441,9 +451,16 @@ class _Kinds(HTMLParser):
                 self.li_text[-1] = True
 
 
+def _html(text: str) -> str:
+    """Markdown with numbered boxes and tagged table headers, unless the tags would change
+    how the page renders (then no header is tagged and no row moves)."""
+    plain, tagged = _md(_mark(text)), _md(_mark(text, headers=True))
+    return tagged if _HDR.sub("", tagged) == plain else plain
+
+
 def _parse(text: str) -> _Kinds:
     p = _Kinds()
-    p.feed(_md(_mark(text)))
+    p.feed(_html(text))
     return p
 
 
@@ -459,11 +476,8 @@ def _line_of(text: str, pos: int) -> int:
 
 
 def _movable(text: str, kinds: dict[int, str]) -> set[int]:
-    """Row boxes whose source line is a markdown pipe row (a raw <table> cell is clickable,
-    but its row spans several lines, so it does not move)."""
-    lines = _EOL.split(text)
-    return {i for i, m in enumerate(_BOX.finditer(text)) if kinds.get(i) == "row"
-            and "|" in (ln := lines[_line_of(text, m.start())]) and not ln.lstrip().startswith("<")}
+    """Boxes in rows of tables markdown built (see _Kinds); those rows move."""
+    return {i for i, k in kinds.items() if k == "row"}
 
 
 _SEPLINE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
@@ -477,6 +491,7 @@ def _headers(text: str) -> str:
             h = lines[n - 1]
             k = len(h) - len(h.lstrip())
             k += h[k:k + 1] == "|"
+            k += len(h[k:]) - len(h[k:].lstrip(" \t"))  # inside the first cell, before its text
             lines[n - 1] = f"{h[:k]}\ue003{n}\ue004{h[k:]}"
     seps = _EOL.findall(text) + [""]
     return "".join(a + b for a, b in zip(lines, seps))
@@ -574,7 +589,7 @@ button.cb{all:unset;cursor:pointer;font-size:1.3em;line-height:1;padding:2px 4px
 button.cb:hover,button.cb:focus-visible{background:color-mix(in srgb,var(--c3) 15%,#fff);outline:2px solid var(--c3)}
 .grip{cursor:grab;touch-action:none;user-select:none;color:var(--mute);padding:2px 6px 2px 0;font-size:1.2em}
 td:has(>.grip){white-space:nowrap}
-tr.dragging td{opacity:.45}tr.drop-before td{box-shadow:inset 0 3px 0 var(--c2)}tr.drop-after td{box-shadow:inset 0 -3px 0 var(--c2)}
+tr.dragging td{opacity:.45}tr.drop-before :is(td,th){box-shadow:inset 0 3px 0 var(--c2)}tr.drop-after :is(td,th){box-shadow:inset 0 -3px 0 var(--c2)}
 </style>"""
 
 
@@ -595,7 +610,7 @@ def _render_md(title: str, text: str, cap: str = "", nonce: str = "") -> str:
                 return m.group(2)
             g = '<span class="grip" title="Drag to move">⠿</span>' if i in grips else ""
             return f'{g}<button class="cb" data-i="{i}" title="Click to mark">{m.group(2)}</button>'
-        parts = re.split(r"(<[^>]*>)", _md(_mark(text, headers=True)))  # markers inside a tag are just the glyph
+        parts = re.split(r"(<[^>]*>)", _html(text))  # markers inside a tag are just the glyph
         body, in_th = [], False
         for p in parts:
             if p.startswith("<"):

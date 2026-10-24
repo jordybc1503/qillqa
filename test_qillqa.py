@@ -264,7 +264,7 @@ assert c.post("/api/page/edit", json={**body, "path": "../outside"}).status_code
 
 # round 2: raw html table cells click but do not move; different columns refused; lone \r is a line
 raw = "<table><tbody><tr>\n<td>☐ one</td>\n<td>d1</td>\n</tr><tr>\n<td>☐ two</td>\n<td>d2</td>\n</tr></tbody></table>"
-assert webui._kinds(raw) == {0: "row", 1: "row"} and "☑ one" in e(raw, "check", 0)
+assert webui._kinds(raw) == {0: "cell", 1: "cell"} and "☑ one" in e(raw, "check", 0)
 for bad in ((raw, 0, 1),):
     try:
         e(bad[0], "move", bad[1], to=bad[2])
@@ -323,6 +323,18 @@ img = ("<table><tbody><tr><td>\n☐ | same\n☐ | same\n<img src=\"a.png\">\n</t
 try:
     e(img, "move", 0, to=2, after=True)
     raise AssertionError("a raw html move changed which image a box sits with")
+except ValueError:
+    pass
+
+# round 6: header tags never change how a page renders; raw html rows never move
+for src in ("- ☐ x\n\n# heading | text\n---\n", "- ☐ x\n\n<div>one | two\n---|---\nhello\n</div>\n"):
+    assert "\ue003" not in webui._html(src), f"header tag would change the render of {src!r}"
+assert "<h1" in webui._render_md("t", "- ☐ x\n\n# heading | text\n---\n", cap="c", nonce="n")
+assert "\ue003" in webui._html(CL), "ordinary pipe tables keep their header targets"
+bold = "<table><tbody><tr><td><b>\n☐ | same</b>\n☐ | same\n</td></tr><tr><td><b>\n☐ | same\n</b></td></tr></tbody></table>"
+try:
+    e(bold, "move", 0, to=2, after=True)
+    raise AssertionError("moved a raw html row")
 except ValueError:
     pass
 
