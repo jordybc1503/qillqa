@@ -262,6 +262,25 @@ assert r.status_code == 200, r.text
 assert c.post("/api/page/edit", json={**body, "path": "bikes/warranty/details"}).status_code == 400, "html page"
 assert c.post("/api/page/edit", json={**body, "path": "../outside"}).status_code == 400
 
+# round 2: raw html table cells click but do not move; different columns refused; lone \r is a line
+raw = "<table><tbody><tr>\n<td>☐ one</td>\n<td>d1</td>\n</tr><tr>\n<td>☐ two</td>\n<td>d2</td>\n</tr></tbody></table>"
+assert webui._kinds(raw) == {0: "row", 1: "row"} and "☑ one" in e(raw, "check", 0)
+for bad in ((raw, 0, 1),):
+    try:
+        e(bad[0], "move", bad[1], to=bad[2])
+        raise AssertionError("moved a raw html cell")
+    except ValueError:
+        pass
+assert 'class="grip"' not in webui._render_md("t", raw, cap="c", nonce="n"), "no grip on a raw html cell"
+two = "| a | b | c |\n|---|---|---|\n| ☐ | x | KEEP |\n\n| a | b |\n|---|---|\n| ☐ | y |\n"
+try:
+    e(two, "move", 0, to=1)
+    raise AssertionError("moved a row into a table with fewer columns")
+except ValueError:
+    pass
+cr = "a|b\n---|---\n☐|one\r☐|two\n☐|three\n"
+assert e(cr, "move", 0, to=2, after=True) == "a|b\n---|---\n☐|two\n☐|three\n☐|one\r", repr(e(cr, "move", 0, to=2, after=True))
+
 # an MCP write racing a checklist edit: the shared lock makes the edit see it (409), never drop it
 import threading as _th  # noqa: E402
 cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)

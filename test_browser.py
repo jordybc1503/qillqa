@@ -2,6 +2,7 @@
 Run with any python that has playwright: python test_browser.py"""
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -42,7 +43,7 @@ here = Path(__file__).resolve().parent
 uvicorn = here / ".venv" / "bin" / "uvicorn"
 env = {**os.environ, "QILLQA_PAGES_DIR": str(tmp), "QILLQA_TOKEN": "browser-tok"}
 srv = subprocess.Popen([str(uvicorn), "webui:app", "--port", str(port)], cwd=here, env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 base = f"http://127.0.0.1:{port}"
 try:
     for _ in range(50):
@@ -58,29 +59,61 @@ try:
         pg.fill("input[name=token]", "browser-tok")
         pg.click("button")
         pg.goto(base + "/#plan")
-        pg.wait_for_timeout(1000)
         fr = pg.frame_locator("#page")
         frame = lambda: pg.frames[1]  # noqa: E731
 
+        def until(js, what, secs=30):
+            """Poll the page (it reloads after every edit, so evaluate may hit a dead context)."""
+            end = time.time() + secs
+            while time.time() < end:
+                try:
+                    if frame().evaluate(js):
+                        return
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            raise AssertionError(what)
+
+        cap = lambda: frame().evaluate("document.querySelector('article').dataset.cap")  # noqa: E731
+
+        def rerendered(old, what):
+            until(f"document.readyState==='complete' && document.querySelector('article')?.dataset.cap!=='{old}'", what)
+
+        until("document.readyState==='complete' && !!document.querySelector('button.cb')", "page did not load")
+
         # click: saved to the file, page back at the same scroll
         frame().evaluate("scrollTo(0,200)")
+        c0 = cap()
         fr.locator("tr", has_text=re.compile(r"task 2\b")).locator("button.cb").click()
-        pg.wait_for_timeout(1200)
+        rerendered(c0, "no reload after the click")
         assert "| ☑ | task 2 |" in md.read_text(), "click not saved"
-        assert frame().evaluate("scrollY") > 150, "scroll not restored"
+        until("scrollY > 150", "scroll not restored")
 
-        # a second finger lifting does not drop the row being dragged
+        # finger 7 drags 'task 3' over 'task 5'; finger 9 lifting must not drop it, finger 7 lifting must
         frame().evaluate("scrollTo(0,0)")
-        grip = fr.locator("tr", has_text=re.compile(r"task 1\b")).locator(".grip")
-        frame().evaluate("""() => {const g=document.querySelector('tr .grip');
-          g.dispatchEvent(new PointerEvent('pointerdown',{pointerId:7,bubbles:true,clientX:5,clientY:5}));
-          document.dispatchEvent(new PointerEvent('pointerup',{pointerId:9,bubbles:true}));
-          document.dispatchEvent(new PointerEvent('pointercancel',{pointerId:7,bubbles:true}));}""")
+        pg.wait_for_timeout(200)
+        frame().evaluate("""() => {
+          const row = t => [...document.querySelectorAll('tr')].find(r => [...r.cells].some(c => c.textContent.trim() === t));
+          const g = row('task 3').querySelector('.grip'), r5 = row('task 5').getBoundingClientRect();
+          const ev = (n, id, x, y) => new PointerEvent(n, {pointerId: id, bubbles: true, clientX: x, clientY: y});
+          g.dispatchEvent(ev('pointerdown', 7, 5, 5));
+          document.dispatchEvent(ev('pointermove', 7, r5.left + 40, r5.top + r5.height * 0.75));}""")
         pg.wait_for_timeout(300)
-        assert md.read_text().index("task 1") < md.read_text().index("## Done"), "a foreign pointer moved the row"
+        frame().evaluate("document.dispatchEvent(new PointerEvent('pointerup',{pointerId:9,bubbles:true}))")
+        pg.wait_for_timeout(500)
+        assert md.read_text() == PAGE.replace("| ☐ | task 2 |", "| ☑ | task 2 |"), "a foreign pointer dropped the row"
+        assert frame().evaluate("document.querySelectorAll('tr.dragging').length") == 1, "drag ended early"
+        c0 = cap()
+        frame().evaluate("document.dispatchEvent(new PointerEvent('pointerup',{pointerId:7,bubbles:true}))")
+        rerendered(c0, "no reload after the owner's drop")
+        t = md.read_text()
+        assert t.index("task 4 ") < t.index("task 5 ") < t.index("task 3 ") < t.index("task 6 "), "owner drop failed"
+        grip = fr.locator("tr", has_text=re.compile(r"task 1\b")).locator(".grip")
 
         # drag 'task 1' down a long page into Done, before 'first done' (auto-scroll near the edge)
         frame().evaluate("scrollTo(0,0)")
+        until("scrollY === 0", "did not scroll to the top")
+        c0 = cap()
         bb = grip.bounding_box()
         pg.mouse.move(bb["x"] + 5, bb["y"] + 8)
         pg.mouse.down()
@@ -95,18 +128,18 @@ try:
         pg.mouse.move(tb["x"] + 40, tb["y"] + 5, steps=4)
         assert frame().evaluate("document.querySelectorAll('.drop-before').length") == 1, "no drop mark"
         pg.mouse.up()
-        pg.wait_for_timeout(1200)
+        rerendered(c0, "no reload after the long drag")
         done = md.read_text().split("## Done")[1]
         assert "task 1 " in done and done.index("task 1") < done.index("first done"), "drag not saved"
 
         # stale page: the file changes behind its back -> 409 -> reload, the click is not applied
         md.write_text(md.read_text().replace("first done", "first done (edited)"))
-        before = md.read_text()
+        before, c0 = md.read_text(), cap()
         fr.locator("button.cb").first.click()
-        pg.wait_for_timeout(1200)
+        rerendered(c0, "no reload after 409")
         assert md.read_text() == before, "a stale page overwrote the file"
         assert fr.locator("tr", has_text="(edited)").count() == 1, "no reload after 409"
         b.close()
-finally:
-    srv.terminate()
+finally:  # the whole group: an edit reindexes, which spawns the embedder child
+    os.killpg(srv.pid, signal.SIGTERM)
 print("OK: browser checks pass")

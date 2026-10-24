@@ -428,8 +428,23 @@ def _kinds(text: str) -> dict[int, str]:
     return p.kinds
 
 
+_EOL = re.compile(r"\r\n|\r|\n")  # markdown ends a line at any of these
+
+
 def _line_of(text: str, pos: int) -> int:
-    return text.count("\n", 0, pos)
+    return len(_EOL.findall(text, 0, pos))
+
+
+def _cells(line: str) -> int:
+    return len(re.split(r"(?<!\\)\|", line.strip().strip("|")))
+
+
+def _movable(text: str, kinds: dict[int, str]) -> set[int]:
+    """Row boxes whose source line is a markdown pipe row (a raw <table> cell is clickable,
+    but its row spans several lines, so it does not move)."""
+    lines = _EOL.split(text)
+    return {i for i, m in enumerate(_BOX.finditer(text)) if kinds.get(i) == "row"
+            and "|" in (ln := lines[_line_of(text, m.start())]) and not ln.lstrip().startswith("<")}
 
 
 def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: bool = False) -> str:
@@ -444,14 +459,17 @@ def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: boo
         return text[:m.start()] + ("☐" if m.group() == "☑" else "☑") + text[m.end():]
     if op != "move":
         raise ValueError("unknown op")
-    if kinds[i] != "row" or kinds.get(to) != "row":
-        raise ValueError("only table rows move")
-    lines = re.findall(r"[^\n]*\n|[^\n]+$", text)
-    eol = "\r\n" if "\r\n" in text else "\n"
-    trimmed = bool(lines) and not lines[-1].endswith("\n")
+    movable = _movable(text, kinds)
+    if i not in movable or to not in movable:
+        raise ValueError("only markdown table rows move")
+    lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", text)
+    eol = (_EOL.search(text) or re.match("", "")).group() or "\n"
+    trimmed = bool(lines) and not lines[-1].endswith(("\n", "\r"))
     if trimmed:
         lines[-1] += eol
     src, dst = _line_of(text, boxes[i].start()), _line_of(text, boxes[to].start())
+    if _cells(lines[src]) != _cells(lines[dst]):
+        raise ValueError("those tables have different columns")
     if src != dst:
         row = lines.pop(src)
         dst -= src < dst
@@ -480,7 +498,7 @@ if(m)addEventListener('load',()=>scrollTo(0,+m[1]));
 const send=d=>parent.postMessage(Object.assign({cap,y:Math.round(scrollY)},d),'*');
 document.addEventListener('click',e=>{const b=e.target.closest('button.cb');if(b)send({qillqa:'check',i:+b.dataset.i})});
 let drag=null,pid=null,over=null,after=false,x=0,y=0,raf=0;
-const box=tr=>tr&&tr.querySelector('button.cb');
+const box=tr=>tr&&tr.querySelector('.grip')&&tr.querySelector('button.cb');
 function mark(){if(over)over.classList.remove('drop-before','drop-after');
   const t=document.elementFromPoint(x,y);over=t&&t.closest('tr');
   if(!box(over)||over===drag){over=null;return}
@@ -491,7 +509,8 @@ function end(ok,e){if(!drag||e.pointerId!==pid)return;cancelAnimationFrame(raf);
   if(over)over.classList.remove('drop-before','drop-after');
   if(ok&&over)send({qillqa:'move',i:+box(drag).dataset.i,to:+box(over).dataset.i,after});drag=over=pid=null}
 document.addEventListener('pointerdown',e=>{const g=e.target.closest('.grip');if(!g||drag)return;e.preventDefault();
-  pid=e.pointerId;drag=g.closest('tr');x=e.clientX;y=e.clientY;drag.classList.add('dragging');g.setPointerCapture(e.pointerId);tick()});
+  pid=e.pointerId;drag=g.closest('tr');x=e.clientX;y=e.clientY;drag.classList.add('dragging');
+  try{g.setPointerCapture(e.pointerId)}catch(_){}tick()});
 document.addEventListener('pointermove',e=>{if(drag&&e.pointerId===pid){x=e.clientX;y=e.clientY}});
 document.addEventListener('pointerup',e=>end(true,e));document.addEventListener('pointercancel',e=>end(false,e));
 })();"""
@@ -510,8 +529,9 @@ def _render_md(title: str, text: str, cap: str = "", nonce: str = "") -> str:
     kinds = _kinds(text) if cap else {}
     if kinds:
         rows: dict[int, int] = {}  # source line -> its first box: that one gets the grip
+        movable = _movable(text, kinds)
         for i, m in enumerate(_BOX.finditer(text)):
-            if kinds.get(i) == "row":
+            if i in movable:
                 rows.setdefault(_line_of(text, m.start()), i)
         grips = set(rows.values())
 
@@ -712,6 +732,7 @@ addEventListener('message',async e=>{
   const r=await fetch('/api/page/edit',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({path:p,op:d.qillqa,i:d.i,to:d.to,after:!!d.after,cap:d.cap})});
   if(r.status===401){location='/login';return}
+  if(decodeURIComponent(location.hash.slice(1))!==p)return;  // navigated away meanwhile
   if(!r.ok&&r.status!==409)$('#crumb').textContent='⚠ '+((await r.json()).detail||r.status);
   f.src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()+'#qy='+(d.y|0);
 });
