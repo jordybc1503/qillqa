@@ -168,7 +168,7 @@ assert anon.get(f"/f/{webui._sig('pa/b')}/pa/bc/").status_code == 404, "string p
 assert anon.get(f"/f/{webui._sig('')}/kitchen/").status_code == 404, "root signature"
 assert anon.get("/api/tree").status_code == 401
 
-# checklists: ☐/☑/◐ in a md page are clickable and table rows can be dragged
+# checklists: ☐/☑/◐ in a table row or at the start of a list item are clickable, rows drag
 CL = """# Plan ☐ legend: ☑ done
 
 | ✓ | Task |
@@ -188,31 +188,54 @@ CL = """# Plan ☐ legend: ☑ done
 
 - ☐ loose box
 """
+# box numbers count every glyph in the source: 0,1 legend · 2 tests · 3,4 ship · 5,6 fence · 7 read · 8 loose
+assert webui._kinds(CL) == {2: "row", 3: "row", 4: "row", 7: "row", 8: "item"}, webui._kinds(CL)
 e = webui.edit_checklist
-assert e(CL, "check", 0).count("☑ | write tests") == 1
-assert "| ☑ | ship it ☐ |" in e(CL, "check", 1), "◐ -> ☑"
-assert "| ◐ | ship it ☑ |" in e(CL, "check", 2), "second box on the same line"
-assert "| ☐ | read the code" in e(CL, "check", 3), "☑ -> ☐"
-assert "- ☑ loose box" in e(CL, "check", 4), "list item box"
-moved = e(CL, "move", 0, to=3, after=True)  # 'write tests' -> under 'read the code' in the other table
+assert "| ☑ | write tests |" in e(CL, "check", 2)
+assert "| ☑ | ship it ☐ |" in e(CL, "check", 3), "◐ -> ☑"
+assert "| ◐ | ship it ☑ |" in e(CL, "check", 4), "second box on the same line"
+assert "| ☐ | read the code" in e(CL, "check", 7) and "- ☑ loose box" in e(CL, "check", 8)
+moved = e(CL, "move", 2, to=7, after=True)  # 'write tests' -> under 'read the code' in the other table
 assert moved.index("read the code") < moved.index("write tests") and moved.count("write tests") == 1, moved
-assert moved.split("| ✓ | Task |")[1].split("```")[0].count("|") == 6, "source table lost the row"
-assert e(CL, "move", 1, to=0).index("ship it") < e(CL, "move", 1, to=0).index("write tests"), "move before"
-for bad in (dict(op="move", i=4, to=0), dict(op="move", i=0, to=4), dict(op="move", i=0, to=5), dict(op="check", i=99), dict(op="x", i=0)):
+assert moved.split("| ✓ | Task |")[1].split("```")[0].count("write") == 0, "source table kept the row"
+assert e(CL, "move", 3, to=2).index("ship it") < e(CL, "move", 3, to=2).index("write tests"), "move before"
+for bad in (dict(op="check", i=0), dict(op="check", i=5), dict(op="move", i=8, to=2), dict(op="move", i=2, to=8),
+            dict(op="move", i=2, to=99), dict(op="check", i=99), dict(op="x", i=2)):
     try:
         e(CL, bad.pop("op"), **bad)
         raise AssertionError(f"accepted {bad}")
     except ValueError:
         pass
-assert webui._body_rows(CL.split("\n")) == {4, 5, 15}, webui._body_rows(CL.split("\n"))
+crlf = CL.replace("\n", "\r\n")
+assert e(crlf, "check", 2).count("\r\n") == crlf.count("\r\n"), "CRLF kept on check"
+m2 = e(crlf, "move", 2, to=7, after=True)
+assert m2.count("\r\n") == crlf.count("\r\n") and "\n" not in m2.replace("\r\n", ""), "CRLF kept on move"
+assert e("| a | b |\n|---|---|\n| ☐ | x |", "move", 0, to=0) == "| a | b |\n|---|---|\n| ☐ | x |"
 
-html_ = webui._render_md("t", CL + "\n<script>alert(1)</script>", nonce="N0nce")
-assert [int(x) for x in re.findall(r'data-i="(\d+)"', html_)] == list(range(5)), "boxes numbered in source order"
+# what markdown itself decides, not a regex: tables without outer pipes / compact separators are
+# tables; an indented table is code; a box in a link url or image alt is no button
+odd = {"a | b\n---|---\n☐ | task": {0: "row"}, "|a|b|\n|-|-|\n|☐|task|": {0: "row"},
+       "    | a | b |\n    |---|---|\n    | ☐ | x |": {},
+       "````\n```\n- ☐ code\n```\n````\n\n- ☐ real": {1: "item"},
+       "- ☐ [link](https://example.com/☐) ☐": {0: "item"}, "- ![☐](pic.png) task": {},
+       "text ☐ in a sentence": {}, "- a ☐ late box": {}, "1. ☐ ordered": {0: "item"}}
+for src, want in odd.items():
+    assert webui._kinds(src) == want, (src, webui._kinds(src))
+link = webui._render_md("t", "- ☐ [link](https://example.com/☐) ☐", cap="c", nonce="n")
+assert 'href="https://example.com/☐"' in link and link.count('class="cb"') == 1, link
+alt = webui._render_md("t", "- ☐ ok\n- ![☐](pic.png)", cap="c", nonce="n")
+assert 'alt="☐"' in alt and alt.count('class="cb"') == 1, alt
+pua = webui._render_md("t", "0☐\n\n- ☐ actual", cap="c", nonce="n")
+assert pua.count('data-i="') == 1 and 'data-i="1"' in pua, "a literal marker in the source is not a button"
+
+html_ = webui._render_md("t", CL + "\n<script>alert(1)</script>", cap="C4p", nonce="N0nce")
+assert [int(x) for x in re.findall(r'data-i="(\d+)"', html_)] == [2, 3, 4, 7, 8]
 assert html_.count('class="grip"') == 3, "one grip per table row, none in fences or lists"
-assert "<h1>Plan ☐ legend: ☑ done</h1>" in html_.replace(' id="plan-legend-done"', ""), "a box in prose stays text"
-assert '<script nonce="N0nce">' in html_ and 'data-v="' in html_
-assert "\ue000" not in html_ and '<div class="tw"><table>' in html_
-assert 'class="cb"' not in webui._render_md("t", CL), "without a nonce the page stays static"
+assert all("<tr>" in r for r in html_.split('class="grip"')[:-1]), "every grip sits in a row"
+assert '<script nonce="N0nce">' in html_ and 'data-cap="C4p"' in html_ and "" not in html_
+assert "<h1" in html_ and "Plan ☐ legend: ☑ done</h1>" in html_, "a box in prose stays text"
+assert '<div class="tw"><table>' in html_
+assert 'class="cb"' not in webui._render_md("t", CL), "without a capability the page stays static"
 
 server.write_page("todo", CL, "md", True)
 live = anon.get(c.get("/view?path=todo", follow_redirects=False).headers["location"])
@@ -221,16 +244,37 @@ assert "allow-scripts" in csp and "script-src 'nonce-" in csp, csp
 nonce = re.search(r"'nonce-([^']+)'", csp).group(1)
 assert f'<script nonce="{nonce}">' in live.text
 assert "allow-scripts" not in c.get("/view?path=pa/b").headers["content-security-policy"], "plain md stays script-free"
-v0 = re.search(r'data-v="(\w+)"', live.text).group(1)
-body = {"path": "todo", "op": "check", "i": 0, "v": v0}
+cap = re.search(r'data-cap="([\w-]+)"', live.text).group(1)
+body = {"path": "todo", "op": "check", "i": 2, "cap": cap}
 assert anon.post("/api/page/edit", json=body).status_code == 401
 assert c.post("/api/page/edit", data="x", headers={"content-type": "text/plain"}).status_code == 415
+assert c.post("/api/page/edit", json={**body, "cap": "guessed"}).status_code == 403, "no capability"
+assert c.post("/api/page/edit", json={**body, "path": "kitchen"}).status_code in (400, 403), "cap of another page"
+server.write_page("todo2", CL, "md", True)
+assert c.post("/api/page/edit", json={**body, "path": "todo2"}).status_code == 403, "cap bound to its page"
 r = c.post("/api/page/edit", json=body)
 assert r.status_code == 200 and "| ☑ | write tests |" in server.read_page("todo")["content"], r.text
-assert c.post("/api/page/edit", json=body).status_code == 409, "stale version must not overwrite"
-r = c.post("/api/page/edit", json={**body, "op": "move", "i": 0, "to": 3, "after": True, "v": r.json()["v"]})
+assert c.post("/api/page/edit", json=body).status_code == 409, "stale render must not overwrite"
+cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)
+                                               .headers["location"]).text).group(1)
+r = c.post("/api/page/edit", json={**body, "op": "move", "i": 2, "to": 7, "after": True, "cap": cap})
 assert r.status_code == 200, r.text
-assert c.post("/api/page/edit", json={**body, "path": "bikes/warranty/details", "v": "x"}).status_code == 400, "html page"
-assert c.post("/api/page/edit", json={**body, "path": "../outside", "v": "x"}).status_code == 400
+assert c.post("/api/page/edit", json={**body, "path": "bikes/warranty/details"}).status_code == 400, "html page"
+assert c.post("/api/page/edit", json={**body, "path": "../outside"}).status_code == 400
+
+# an MCP write racing a checklist edit: the shared lock makes the edit see it (409), never drop it
+import threading as _th  # noqa: E402
+cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)
+                                               .headers["location"]).text).group(1)
+got = {}
+with server.page_lock():
+    w = _th.Thread(target=lambda: got.update(r=c.post("/api/page/edit", json={**body, "cap": cap})))
+    w.start()
+    time.sleep(0.3)
+    assert w.is_alive(), "the edit must wait for the lock"
+    p = server.PAGES / "todo" / "index.md"
+    p.write_text(p.read_text() + "\nadded by the MCP\n")
+w.join(5)
+assert got["r"].status_code == 409 and "added by the MCP" in p.read_text(), got["r"].text
 
 print("OK: all checks pass")
