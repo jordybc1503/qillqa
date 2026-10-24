@@ -132,6 +132,22 @@ try:
         done = md.read_text().split("## Done")[1]
         assert "task 1 " in done and done.index("task 1") < done.index("first done"), "drag not saved"
 
+        # drop on a table's header: the row becomes the first of that table
+        c0 = cap()
+        frame().evaluate("""() => {
+          const th = [...document.querySelectorAll('thead tr')].find(r => r.querySelector('.hdr') &&
+                       r.closest('table').textContent.includes('first done'));
+          th.scrollIntoView({block: 'center'});
+          const row = [...document.querySelectorAll('tr')].find(r => [...r.cells].some(c => c.textContent.trim() === 'task 12'));
+          const b = th.getBoundingClientRect(), ev = (n, x, y) => new PointerEvent(n, {pointerId: 11, bubbles: true, clientX: x, clientY: y});
+          row.querySelector('.grip').dispatchEvent(ev('pointerdown', b.left + 40, b.top + b.height / 2));  // no edge auto-scroll
+          document.dispatchEvent(ev('pointermove', b.left + 40, b.top + b.height / 2));}""")
+        until("document.querySelectorAll('thead .drop-after, thead tr.drop-after').length === 1", "no header drop mark")
+        frame().evaluate("document.dispatchEvent(new PointerEvent('pointerup',{pointerId:11,bubbles:true}))")
+        rerendered(c0, "no reload after the header drop")
+        done = md.read_text().split("## Done")[1]
+        assert done.index("task 12") < done.index("task 1 "), "header drop did not put the row first"
+
         # stale page: the file changes behind its back -> 409 -> reload, the click is not applied
         md.write_text(md.read_text().replace("first done", "first done (edited)"))
         before, c0 = md.read_text(), cap()

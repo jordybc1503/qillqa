@@ -301,6 +301,31 @@ try:
 except ValueError:
     pass
 
+# round 5: moving a table's last row out; dropping on a header (also of an empty table);
+# images in raw html cells are part of the row
+last = "a|b\n-|-\n☐|one\n\na|b\n-|-\n☐|two\n"
+assert e(last, "move", 0, to=1, after=True) == "a|b\n-|-\n\na|b\n-|-\n☐|two\n☐|one\n"
+empty = "a|b\n-|-\n☐|one\n\nc|d\n-|-\n"
+assert e(empty, "move", 0, line=5) == "a|b\n-|-\n\nc|d\n-|-\n☐|one\n", repr(e(empty, "move", 0, line=5))
+assert e(last, "move", 1, line=1) == "a|b\n-|-\n☐|two\n☐|one\n\na|b\n-|-\n", "header drop = first row"
+for bad_line in (0, 2, 99):
+    try:
+        e(last, "move", 0, line=bad_line)
+        raise AssertionError(f"moved under a non-separator line {bad_line}")
+    except ValueError:
+        pass
+hd = webui._render_md("t", empty, cap="c", nonce="n")
+assert hd.count('class="hdr"') == 2 and 'data-l="1"' in hd and 'data-l="5"' in hd and "" not in hd, hd
+fenced = webui._render_md("t", "- ☐ x\n\n```\na|b\n-|-\n```", cap="c", nonce="n")
+assert "" not in fenced and 'class="hdr"' not in fenced, "no header marker leaks from a fence"
+img = ("<table><tbody><tr><td>\n☐ | same\n☐ | same\n<img src=\"a.png\">\n</td></tr><tr><td>\n☐ | same\n"
+       "<img src=\"b.png\">\n</td></tr></tbody></table>")
+try:
+    e(img, "move", 0, to=2, after=True)
+    raise AssertionError("a raw html move changed which image a box sits with")
+except ValueError:
+    pass
+
 # an MCP write racing a checklist edit: the shared lock makes the edit see it (409), never drop it
 import threading as _th  # noqa: E402
 cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)

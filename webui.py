@@ -310,7 +310,8 @@ async def api_page_edit(req: Request):
             if granted[1] != _version(text):
                 return JSONResponse({"error": "the page changed, reloaded"}, status_code=409)
             new = edit_checklist(text, str(d.get("op")), int(d.get("i", -1)),
-                                 None if d.get("to") is None else int(d["to"]), bool(d.get("after")))
+                                 None if d.get("to") is None else int(d["to"]), bool(d.get("after")),
+                                 None if d.get("line") is None else int(d["line"]))
             fd, tmp = tempfile.mkstemp(dir=idx.parent, prefix=".edit-", suffix=".tmp")
             with os.fdopen(fd, "wb") as f:
                 f.write(new.encode())
@@ -365,7 +366,8 @@ _AUDIO = r"mp3|wav|m4a|ogg|flac|opus"
 
 BOXES = "☐☑◐"
 _BOX = re.compile(f"[{BOXES}]")
-_PUA = re.compile("[\ue000-\ue002]")
+_PUA = re.compile("[\ue000-\ue004]")
+_HDR = re.compile("\ue003(\\d+)\ue004")  # header row of a table: its separator line
 _MARK = re.compile(f"\ue000(\\d+)\ue001([{BOXES}])\ue002")
 _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 _caps: dict[str, tuple[str, str]] = {}  # capability -> (page, version); newest last
@@ -380,10 +382,11 @@ def _md(text: str) -> str:
     return markdown.markdown(text.replace("\r\n", "\n"), extensions=["fenced_code", "tables", "toc", "sane_lists"])
 
 
-def _mark(text: str) -> str:
-    """Number every box in the source (a literal marker char in the source is dropped)."""
-    n = iter(range(1 << 30))
-    return _BOX.sub(lambda m: f"\ue000{next(n)}\ue001{m.group()}\ue002", _PUA.sub("", text))
+def _mark(text: str, headers: bool = False) -> str:
+    """Number every box in the source (a literal marker char in the source is dropped);
+    with `headers`, also tag each table header line (see _headers)."""
+    n, text = iter(range(1 << 30)), _PUA.sub("", text)
+    return _BOX.sub(lambda m: f"\ue000{next(n)}\ue001{m.group()}\ue002", _headers(text) if headers else text)
 
 
 class _Kinds(HTMLParser):
@@ -400,6 +403,8 @@ class _Kinds(HTMLParser):
         self.rows: list[tuple[str, ...]] = []  # cell texts of every row that holds a box
 
     def handle_starttag(self, tag, attrs):
+        if self.cells and tag not in ("td", "th", "tr"):
+            self.cells[-1] += self.get_starttag_text()  # an image or link is part of the cell
         if tag not in _VOID:
             self.stack.append(tag)
             if tag == "li":
@@ -461,10 +466,27 @@ def _movable(text: str, kinds: dict[int, str]) -> set[int]:
             and "|" in (ln := lines[_line_of(text, m.start())]) and not ln.lstrip().startswith("<")}
 
 
-def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: bool = False) -> str:
+_SEPLINE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
+
+
+def _headers(text: str) -> str:
+    """Tag the header line of every pipe table with its separator's line number (\ue003n\ue004)."""
+    lines = _EOL.split(text)
+    for n in range(len(lines) - 1, 0, -1):
+        if _SEPLINE.match(lines[n]) and "|" in lines[n - 1]:
+            h = lines[n - 1]
+            k = len(h) - len(h.lstrip())
+            k += h[k:k + 1] == "|"
+            lines[n - 1] = f"{h[:k]}\ue003{n}\ue004{h[k:]}"
+    seps = _EOL.findall(text) + [""]
+    return "".join(a + b for a, b in zip(lines, seps))
+
+
+def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: bool = False,
+                   line: int | None = None) -> str:
     """'check' flips box i (☑ -> ☐, else -> ☑). 'move' puts the table row holding box i
-    before/after the row holding box `to` (any table of the page). Line endings are kept.
-    Raises ValueError."""
+    before/after the row holding box `to`, or, with `line` (a table's separator line), first
+    in that table, even an empty one. Line endings are kept. Raises ValueError."""
     boxes, kinds = list(_BOX.finditer(text)), _kinds(text)
     if i not in kinds:
         raise ValueError("no such box")
@@ -474,13 +496,19 @@ def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: boo
     if op != "move":
         raise ValueError("unknown op")
     movable = _movable(text, kinds)
-    if i not in movable or to not in movable:
+    if i not in movable or (line is None and to not in movable):
         raise ValueError("only markdown table rows move")
     lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", text)
     trimmed = bool(lines) and not lines[-1].endswith(("\n", "\r"))
     if trimmed:  # give the last line its neighbour's ending while it moves around
         lines[-1] += _EOL.search(lines[-2]).group() if len(lines) > 1 else "\n"
-    src, dst = _line_of(text, boxes[i].start()), _line_of(text, boxes[to].start())
+    src = _line_of(text, boxes[i].start())
+    if line is not None:  # first row of the table whose separator is `line`
+        if not (0 < line < len(lines) and _SEPLINE.match(lines[line].rstrip("\r\n"))):
+            raise ValueError("no table there")
+        dst, after = line, True
+    else:
+        dst = _line_of(text, boxes[to].start())
     if src != dst:
         row = lines.pop(src)
         dst -= src < dst
@@ -499,6 +527,7 @@ def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: boo
 def _rest(text: str) -> str:
     """The rendered page without the rows that hold a box (box numbers dropped)."""
     html_ = re.sub(r"<tr>(?:(?!</tr>).)*?\ue000.*?</tr>\s*", "", _md(_mark(text)), flags=re.S)
+    html_ = re.sub(r"<tr>(?:\s*<td[^>]*>\s*</td>)+\s*</tr>\s*", "", html_)  # an emptied table's filler row
     return _MARK.sub(lambda m: m.group(2), html_)
 
 
@@ -522,16 +551,17 @@ if(m)addEventListener('load',()=>scrollTo(0,+m[1]));
 const send=d=>parent.postMessage(Object.assign({cap,y:Math.round(scrollY)},d),'*');
 document.addEventListener('click',e=>{const b=e.target.closest('button.cb');if(b)send({qillqa:'check',i:+b.dataset.i})});
 let drag=null,pid=null,over=null,after=false,x=0,y=0,raf=0;
-const box=tr=>tr&&tr.querySelector('.grip')&&tr.querySelector('button.cb');
+const box=tr=>tr&&tr.querySelector('.grip')&&tr.querySelector('button.cb'),hdr=tr=>tr&&tr.querySelector('.hdr');
 function mark(){if(over)over.classList.remove('drop-before','drop-after');
   const t=document.elementFromPoint(x,y);over=t&&t.closest('tr');
-  if(!box(over)||over===drag){over=null;return}
-  const r=over.getBoundingClientRect();after=y>r.top+r.height/2;over.classList.add(after?'drop-after':'drop-before')}
+  if(over===drag||!(box(over)||hdr(over))){over=null;return}
+  const r=over.getBoundingClientRect();after=!!hdr(over)||y>r.top+r.height/2;over.classList.add(after?'drop-after':'drop-before')}
 function tick(){const z=80;if(y<z)scrollBy(0,-(z-y)/3);else if(y>innerHeight-z)scrollBy(0,(y-innerHeight+z)/3);
   mark();raf=requestAnimationFrame(tick)}
 function end(ok,e){if(!drag||e.pointerId!==pid)return;cancelAnimationFrame(raf);drag.classList.remove('dragging');
   if(over)over.classList.remove('drop-before','drop-after');
-  if(ok&&over)send({qillqa:'move',i:+box(drag).dataset.i,to:+box(over).dataset.i,after});drag=over=pid=null}
+  if(ok&&over)send(hdr(over)?{qillqa:'move',i:+box(drag).dataset.i,line:+hdr(over).dataset.l}
+    :{qillqa:'move',i:+box(drag).dataset.i,to:+box(over).dataset.i,after});drag=over=pid=null}
 document.addEventListener('pointerdown',e=>{const g=e.target.closest('.grip');if(!g||drag)return;e.preventDefault();
   pid=e.pointerId;drag=g.closest('tr');x=e.clientX;y=e.clientY;drag.classList.add('dragging');
   try{g.setPointerCapture(e.pointerId)}catch(_){}tick()});
@@ -565,9 +595,16 @@ def _render_md(title: str, text: str, cap: str = "", nonce: str = "") -> str:
                 return m.group(2)
             g = '<span class="grip" title="Drag to move">⠿</span>' if i in grips else ""
             return f'{g}<button class="cb" data-i="{i}" title="Click to mark">{m.group(2)}</button>'
-        parts = re.split(r"(<[^>]*>)", _md(_mark(text)))  # markers inside a tag are just the glyph
-        body = "".join(_MARK.sub(lambda m: m.group(2), p) if p.startswith("<") else _MARK.sub(live, p)
-                       for p in parts)
+        parts = re.split(r"(<[^>]*>)", _md(_mark(text, headers=True)))  # markers inside a tag are just the glyph
+        body, in_th = [], False
+        for p in parts:
+            if p.startswith("<"):
+                in_th = p.startswith("<th") or (in_th and not p.startswith("</th"))
+                body.append(_HDR.sub("", _MARK.sub(lambda m: m.group(2), p)))
+            else:
+                hdr = (lambda m: f'<span class="hdr" data-l="{m.group(1)}"></span>') if in_th else ""
+                body.append(_HDR.sub(hdr, _MARK.sub(live, p)))
+        body = "".join(body)
         body = _CHECK_CSS + body + f'<script nonce="{nonce}">{_CHECK_JS}</script>'
     else:
         body = _md(text)
@@ -754,7 +791,7 @@ addEventListener('message',async e=>{
   const f=$('#page'),d=e.data,p=decodeURIComponent(location.hash.slice(1));
   if(e.source!==f.contentWindow||!d||!['check','move'].includes(d.qillqa)||!p)return;
   const r=await fetch('/api/page/edit',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({path:p,op:d.qillqa,i:d.i,to:d.to,after:!!d.after,cap:d.cap})});
+    body:JSON.stringify({path:p,op:d.qillqa,i:d.i,to:d.to,line:d.line,after:!!d.after,cap:d.cap})});
   if(r.status===401){location='/login';return}
   if(decodeURIComponent(location.hash.slice(1))!==p)return;  // navigated away meanwhile
   if(!r.ok&&r.status!==409)$('#crumb').textContent='⚠ '+((await r.json()).detail||r.status);
