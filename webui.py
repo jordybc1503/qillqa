@@ -25,6 +25,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import markdown
+from markdown.extensions.toc import slugify
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -378,8 +379,14 @@ def _version(text: str) -> str:
     return hashlib.sha1(text.encode()).hexdigest()[:12]
 
 
+def _slugify(value: str, separator: str) -> str:
+    """Heading ids as if there were no box numbers or header tags in the text."""
+    return slugify(_HDR.sub("", _MARK.sub(lambda m: m.group(2), value)), separator)
+
+
 def _md(text: str) -> str:
-    return markdown.markdown(text.replace("\r\n", "\n"), extensions=["fenced_code", "tables", "toc", "sane_lists"])
+    return markdown.markdown(text.replace("\r\n", "\n"), extensions=["fenced_code", "tables", "toc", "sane_lists"],
+                             extension_configs={"toc": {"slugify": _slugify}})
 
 
 def _mark(text: str, headers: set[int] | None = None) -> str:

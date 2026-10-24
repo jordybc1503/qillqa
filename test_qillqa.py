@@ -344,6 +344,11 @@ assert webui._kinds(mixed_h) == {0: "row", 1: "row"}, webui._kinds(mixed_h)
 li_tab = "- | Done | Task |\n  |---|---|\n  | ☐ | one |\n  | ☐ | two |"
 assert webui._kinds(li_tab) == {0: "row", 1: "row"}, webui._kinds(li_tab)
 
+# round 8: boxes in headings keep the heading ids; a row moves between sections with boxed headings
+sec = "## ☐ Todo\n\nState|Task\n---|---\n☐|Milk\n\n## ☑ Done\n\nState|Task\n---|---\n☑|Bread"
+assert 'id="done"' in webui._render_md("t", sec, cap="c", nonce="n") and 'id="done"' in webui._render_md("t", sec)
+assert "Milk" in e(sec, "move", 1, to=3).split("Done")[1], "cross-section move refused"
+
 # an MCP write racing a checklist edit: the shared lock makes the edit see it (409), never drop it
 import threading as _th  # noqa: E402
 cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)
