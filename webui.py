@@ -489,10 +489,17 @@ def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: boo
     if trimmed:  # the file had no final line ending: drop whichever one is last now
         out = re.sub(r"(\r\n|\r|\n)\Z", "", out)
     # whatever the source looked like, every boxed row must render with exactly the same
-    # cells after the move (another column count, a raw html cell, a \\| ... would change them)
-    if sorted(_parse(out).rows) != sorted(_parse(text).rows):
+    # cells after the move (another column count, a raw html cell, a \\| ... would change them),
+    # and the rest of the page must render exactly as before (joined line endings, ...)
+    if sorted(_parse(out).rows) != sorted(_parse(text).rows) or _rest(out) != _rest(text):
         raise ValueError("that row would change in that table (different columns?)")
     return out
+
+
+def _rest(text: str) -> str:
+    """The rendered page without the rows that hold a box (box numbers dropped)."""
+    html_ = re.sub(r"<tr>(?:(?!</tr>).)*?\ue000.*?</tr>\s*", "", _md(_mark(text)), flags=re.S)
+    return _MARK.sub(lambda m: m.group(2), html_)
 
 
 def _grant(page: str, version: str) -> str:

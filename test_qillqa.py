@@ -293,6 +293,14 @@ for src in ("a|b|c\n-|-|-\n☐|x\\\\|KEEP\n\na|b\n-|-\n☐|y\n",
     except ValueError:
         pass
 
+# round 4: a move must not change anything outside the moved row (lone \r + \n would join)
+lone = "a|b\n-|-\r☐|one\n\nKEEP | THIS | TEXT\n\na|b\n-|-\n☐|two\n"
+try:
+    e(lone, "move", 0, to=1, after=True)
+    raise AssertionError("a move changed content outside the row")
+except ValueError:
+    pass
+
 # an MCP write racing a checklist edit: the shared lock makes the edit see it (409), never drop it
 import threading as _th  # noqa: E402
 cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)
