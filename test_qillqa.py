@@ -168,4 +168,69 @@ assert anon.get(f"/f/{webui._sig('pa/b')}/pa/bc/").status_code == 404, "string p
 assert anon.get(f"/f/{webui._sig('')}/kitchen/").status_code == 404, "root signature"
 assert anon.get("/api/tree").status_code == 401
 
+# checklists: ☐/☑/◐ in a md page are clickable and table rows can be dragged
+CL = """# Plan ☐ legend: ☑ done
+
+| ✓ | Task |
+|---|---|
+| ☐ | write tests |
+| ◐ | ship it ☐ |
+
+```
+| ☐ | inside a fence |
+|---|---|
+| ☐ | not a row |
+```
+
+| ✓ | Done |
+|---|---|
+| ☑ | read the code |
+
+- ☐ loose box
+"""
+e = webui.edit_checklist
+assert e(CL, "check", 0).count("☑ | write tests") == 1
+assert "| ☑ | ship it ☐ |" in e(CL, "check", 1), "◐ -> ☑"
+assert "| ◐ | ship it ☑ |" in e(CL, "check", 2), "second box on the same line"
+assert "| ☐ | read the code" in e(CL, "check", 3), "☑ -> ☐"
+assert "- ☑ loose box" in e(CL, "check", 4), "list item box"
+moved = e(CL, "move", 0, to=3, after=True)  # 'write tests' -> under 'read the code' in the other table
+assert moved.index("read the code") < moved.index("write tests") and moved.count("write tests") == 1, moved
+assert moved.split("| ✓ | Task |")[1].split("```")[0].count("|") == 6, "source table lost the row"
+assert e(CL, "move", 1, to=0).index("ship it") < e(CL, "move", 1, to=0).index("write tests"), "move before"
+for bad in (dict(op="move", i=4, to=0), dict(op="move", i=0, to=4), dict(op="move", i=0, to=5), dict(op="check", i=99), dict(op="x", i=0)):
+    try:
+        e(CL, bad.pop("op"), **bad)
+        raise AssertionError(f"accepted {bad}")
+    except ValueError:
+        pass
+assert webui._body_rows(CL.split("\n")) == {4, 5, 15}, webui._body_rows(CL.split("\n"))
+
+html_ = webui._render_md("t", CL + "\n<script>alert(1)</script>", nonce="N0nce")
+assert [int(x) for x in re.findall(r'data-i="(\d+)"', html_)] == list(range(5)), "boxes numbered in source order"
+assert html_.count('class="grip"') == 3, "one grip per table row, none in fences or lists"
+assert "<h1>Plan ☐ legend: ☑ done</h1>" in html_.replace(' id="plan-legend-done"', ""), "a box in prose stays text"
+assert '<script nonce="N0nce">' in html_ and 'data-v="' in html_
+assert "\ue000" not in html_ and '<div class="tw"><table>' in html_
+assert 'class="cb"' not in webui._render_md("t", CL), "without a nonce the page stays static"
+
+server.write_page("todo", CL, "md", True)
+live = anon.get(c.get("/view?path=todo", follow_redirects=False).headers["location"])
+csp = live.headers["content-security-policy"]
+assert "allow-scripts" in csp and "script-src 'nonce-" in csp, csp
+nonce = re.search(r"'nonce-([^']+)'", csp).group(1)
+assert f'<script nonce="{nonce}">' in live.text
+assert "allow-scripts" not in c.get("/view?path=pa/b").headers["content-security-policy"], "plain md stays script-free"
+v0 = re.search(r'data-v="(\w+)"', live.text).group(1)
+body = {"path": "todo", "op": "check", "i": 0, "v": v0}
+assert anon.post("/api/page/edit", json=body).status_code == 401
+assert c.post("/api/page/edit", data="x", headers={"content-type": "text/plain"}).status_code == 415
+r = c.post("/api/page/edit", json=body)
+assert r.status_code == 200 and "| ☑ | write tests |" in server.read_page("todo")["content"], r.text
+assert c.post("/api/page/edit", json=body).status_code == 409, "stale version must not overwrite"
+r = c.post("/api/page/edit", json={**body, "op": "move", "i": 0, "to": 3, "after": True, "v": r.json()["v"]})
+assert r.status_code == 200, r.text
+assert c.post("/api/page/edit", json={**body, "path": "bikes/warranty/details", "v": "x"}).status_code == 400, "html page"
+assert c.post("/api/page/edit", json={**body, "path": "../outside", "v": "x"}).status_code == 400
+
 print("OK: all checks pass")

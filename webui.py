@@ -14,6 +14,7 @@ import html
 import multiprocessing
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -286,6 +287,33 @@ def api_sync():
     return {"ok": True}
 
 
+@app.post("/api/page/edit")
+async def api_page_edit(req: Request):
+    """Checklist edit from the shell: {path, op: check|move, i, to?, after?, v}. 409 if the file
+    changed since the page was rendered (v = its hash), so a stale page never overwrites."""
+    if not req.headers.get("content-type", "").startswith("application/json"):
+        raise HTTPException(415, "json only")
+    d = await req.json()
+    try:
+        page = _safe(str(d.get("path", "")))
+        idx = _index(page) if page != PAGES else None
+        if not idx or idx.suffix != ".md":
+            raise ValueError("not a markdown page")
+        with _edit_lock:
+            text = idx.read_text(errors="replace")
+            if d.get("v") != _version(text):
+                return JSONResponse({"error": "the page changed, reloaded"}, status_code=409)
+            new = edit_checklist(text, str(d.get("op")), int(d.get("i", -1)),
+                                 None if d.get("to") is None else int(d["to"]), bool(d.get("after")))
+            tmp = idx.with_name(idx.name + ".tmp")
+            tmp.write_text(new)
+            os.replace(tmp, idx)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    threading.Thread(target=sync, daemon=True).start()
+    return {"ok": True, "v": _version(new)}
+
+
 @app.get("/api/search")
 def api_search(q: str = "", limit: int = 10, path: str = ""):
     try:
@@ -311,13 +339,151 @@ def signed_url(rel: str) -> str:
 
 _HTML_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals"
 _MD_SANDBOX = "sandbox allow-popups allow-popups-to-escape-sandbox"
+_MD_LIVE_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
 _SAFE_HEADERS = {"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 _VIDEO = r"mp4|webm|mov|m4v"
 _AUDIO = r"mp3|wav|m4a|ogg|flac|opus"
 
 
-def _render_md(title: str, text: str) -> str:
+# ---------------------------------------------------------------- checklists
+# A markdown page with ☐/☑/◐ becomes a checklist: click a box to flip it, drag a
+# row by its ⠿ grip to another place or another table. The md file stays the
+# source of truth: the sandboxed page posts the change to the shell (which has the
+# session), the shell calls POST /api/page/edit, the page reloads at the same
+# scroll. Boxes are numbered by order in the source; "v" (the file's hash) makes a
+# stale page reload instead of overwriting a newer file.
+
+BOXES = "☐☑◐"
+_BOX = re.compile(f"[{BOXES}]")
+_SEP = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_edit_lock = threading.Lock()
+
+
+def _version(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def _body_rows(lines: list[str]) -> set[int]:
+    """Line numbers of table body rows (header and separator excluded, fences skipped)."""
+    rows, fence, i = set(), False, 0
+    while i < len(lines):
+        if _FENCE.match(lines[i]):
+            fence = not fence
+        elif not fence and i and _SEP.match(lines[i]) and lines[i - 1].lstrip().startswith("|"):
+            i += 1
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                rows.add(i)
+                i += 1
+            continue
+        i += 1
+    return rows
+
+
+_ITEM = re.compile(rf"^\s*(?:[-*+]|\d+[.)])\s+[{BOXES}]")
+
+
+def _live_lines(lines: list[str]) -> set[int]:
+    """Lines whose boxes are clickable: table body rows and list items that start with a box.
+    A ☐ in a sentence (or in a fence) stays text."""
+    fence, items = False, set()
+    for n, line in enumerate(lines):
+        if _FENCE.match(line):
+            fence = not fence
+        elif not fence and _ITEM.match(line):
+            items.add(n)
+    return items | {n for n in _body_rows(lines) if _BOX.search(lines[n])}
+
+
+def _box_lines(lines: list[str]) -> list[int]:
+    """Line number of every clickable box, in source order."""
+    live = _live_lines(lines)
+    return [n for n, line in enumerate(lines) if n in live for _ in _BOX.findall(line)]
+
+
+def edit_checklist(text: str, op: str, i: int, to: int | None = None, after: bool = False) -> str:
+    """'check' flips box i (☑ -> ☐, else -> ☑). 'move' puts the table row holding box i
+    before/after the row holding box `to` (any table of the page). Raises ValueError."""
+    lines = text.split("\n")
+    where = _box_lines(lines)
+    if not 0 <= i < len(where):
+        raise ValueError("no such box")
+    if op == "check":
+        line, k = where[i], i - where.index(where[i])  # k-th box on that line
+        m = list(_BOX.finditer(lines[line]))[k]
+        new = "☐" if m.group() == "☑" else "☑"
+        lines[line] = lines[line][:m.start()] + new + lines[line][m.end():]
+    elif op == "move":
+        if to is None or not 0 <= to < len(where):
+            raise ValueError("no such target box")
+        rows, src, dst = _body_rows(lines), where[i], where[to]
+        if src not in rows or dst not in rows:
+            raise ValueError("only table rows move")
+        if src != dst:
+            row = lines.pop(src)
+            dst -= src < dst
+            lines.insert(dst + 1 if after else dst, row)
+    else:
+        raise ValueError("unknown op")
+    return "\n".join(lines)
+
+
+_CHECK_JS = """(()=>{
+const v=document.querySelector('article').dataset.v,m=location.hash.match(/^#qy=(\\d+)$/);
+if(m)addEventListener('load',()=>scrollTo(0,+m[1]));
+const send=d=>parent.postMessage(Object.assign({v,y:Math.round(scrollY)},d),'*');
+document.addEventListener('click',e=>{const b=e.target.closest('button.cb');if(b)send({qillqa:'check',i:+b.dataset.i})});
+let drag=null,over=null,after=false,x=0,y=0,raf=0;
+const box=tr=>tr&&tr.querySelector('button.cb');
+function mark(){if(over)over.classList.remove('drop-before','drop-after');
+  const t=document.elementFromPoint(x,y);over=t&&t.closest('tr');
+  if(!box(over)||over===drag){over=null;return}
+  const r=over.getBoundingClientRect();after=y>r.top+r.height/2;over.classList.add(after?'drop-after':'drop-before')}
+function tick(){const z=80;if(y<z)scrollBy(0,-(z-y)/3);else if(y>innerHeight-z)scrollBy(0,(y-innerHeight+z)/3);
+  mark();raf=requestAnimationFrame(tick)}
+function end(ok){if(!drag)return;cancelAnimationFrame(raf);drag.classList.remove('dragging');
+  if(over)over.classList.remove('drop-before','drop-after');
+  if(ok&&over)send({qillqa:'move',i:+box(drag).dataset.i,to:+box(over).dataset.i,after});drag=over=null}
+document.addEventListener('pointerdown',e=>{const g=e.target.closest('.grip');if(!g)return;e.preventDefault();
+  drag=g.closest('tr');x=e.clientX;y=e.clientY;drag.classList.add('dragging');g.setPointerCapture(e.pointerId);tick()});
+document.addEventListener('pointermove',e=>{if(drag){x=e.clientX;y=e.clientY}});
+document.addEventListener('pointerup',()=>end(true));document.addEventListener('pointercancel',()=>end(false));
+})();"""
+
+_CHECK_CSS = """<style>
+button.cb{all:unset;cursor:pointer;font-size:1.3em;line-height:1;padding:2px 4px;border-radius:6px}
+button.cb:hover,button.cb:focus-visible{background:color-mix(in srgb,var(--c3) 15%,#fff);outline:2px solid var(--c3)}
+.grip{cursor:grab;touch-action:none;user-select:none;color:var(--mute);padding:2px 6px 2px 0;font-size:1.2em}
+td:has(>.grip){white-space:nowrap}
+tr.dragging td{opacity:.45}tr.drop-before td{box-shadow:inset 0 3px 0 var(--c2)}tr.drop-after td{box-shadow:inset 0 -3px 0 var(--c2)}
+</style>"""
+
+
+def _render_md(title: str, text: str, nonce: str = "") -> str:
+    """With a nonce and boxes in the text, the page is an editable checklist."""
+    lines = text.split("\n")
+    act = _live_lines(lines) if nonce else set()
+    live, text_src = bool(act), text
+    if live:  # number the boxes in the source (private-use marks), so html order == source order
+        n, rows = 0, _body_rows(lines)
+        for ln, line in enumerate(lines):
+            if ln not in act:
+                continue
+            first = True
+            def num(m):
+                nonlocal n, first
+                grip = "g" if ln in rows and first else ""
+                first, n = False, n + 1
+                return f"\ue000{n - 1}{grip}\ue001{m.group()}\ue002"
+            lines[ln] = _BOX.sub(num, line)
+        text = "\n".join(lines)
     body = markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
+    if live:
+        def btn(m):
+            grip = '<span class="grip" title="Drag to move">⠿</span>' if m.group(2) else ""
+            return f'{grip}<button class="cb" data-i="{m.group(1)}" title="Click to mark">{m.group(3)}</button>'
+        body = re.sub(f"\ue000(\\d+)(g?)\ue001([{BOXES}])\ue002", btn, body)
+        body = _CHECK_CSS + body + f'<script nonce="{nonce}">{_CHECK_JS}</script>'
     # ![x](clip.mp4) -> video / audio player
     body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_VIDEO}))"\s*/?>',
                   r'<video controls preload="metadata" src="\2" title="\1"></video>', body, flags=re.I)
@@ -325,7 +491,9 @@ def _render_md(title: str, text: str) -> str:
                   r'<audio controls preload="metadata" src="\2" title="\1"></audio>', body, flags=re.I)
     # links leave the sandboxed page in a new tab; in-page #anchors stay put
     body = re.sub(r'<a href="(?!#)', '<a target="_blank" href="', body)
-    return _shell(title, f'<article>{body}</article>')
+    body = body.replace("<table>", '<div class="tw"><table>').replace("</table>", "</table></div>")
+    v = f' data-v="{_version(text_src)}"' if live else ""
+    return _shell(title, f'<article{v}>{body}</article>')
 
 
 @app.get("/view")
@@ -361,11 +529,15 @@ def signed_file(sig: str, rest: str, req: Request):
         if not idx:
             _bad(ValueError("no page here"))
         text = idx.read_text(errors="replace")
-        html_page = idx.suffix == ".html"
-        return Response(text if html_page else _render_md(_title(target), text),
-                        media_type="text/html; charset=utf-8",
-                        headers={**_SAFE_HEADERS, "Cache-Control": "no-store",
-                                 "Content-Security-Policy": _HTML_SANDBOX if html_page else _MD_SANDBOX})
+        if idx.suffix == ".html":
+            body, csp = text, _HTML_SANDBOX
+        elif _live_lines(text.split("\n")):  # checklist: only our nonce'd script runs, never raw <script> in the md
+            nonce = secrets.token_urlsafe(16)
+            body, csp = _render_md(_title(target), text, nonce), f"{_MD_LIVE_SANDBOX}; script-src 'nonce-{nonce}'"
+        else:
+            body, csp = _render_md(_title(target), text), _MD_SANDBOX
+        return Response(body, media_type="text/html; charset=utf-8",
+                        headers={**_SAFE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": csp})
     if not target.is_file():
         _bad(ValueError("not found"))
     r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private"})
@@ -398,6 +570,7 @@ blockquote{margin:1em 0;padding:10px 16px;background:#ecf8f6;border-left:4px sol
 blockquote p{margin:.4em 0}
 table{border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:1em 0}
 th{background:linear-gradient(90deg,var(--c1),var(--c3));color:#fff;text-align:left;font-weight:600}
+.tw{overflow-x:auto;margin:1em 0}.tw table{margin:0}
 td,th{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}
 tbody tr:nth-child(even) td{background:#f7f8fe}
 hr{border:0;height:3px;background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));border-radius:3px}
@@ -489,6 +662,16 @@ async function find(){
 }
 $('#only').onchange=()=>{scope=$('#only').checked?decodeURIComponent(location.hash.slice(1)):'';show();find()};
 $('#toggle').onclick=()=>$('nav').classList.toggle('open');
+// checklist pages post {qillqa: check|move} here; only the shown page, only its own iframe
+addEventListener('message',async e=>{
+  const f=$('#page'),d=e.data,p=decodeURIComponent(location.hash.slice(1));
+  if(e.source!==f.contentWindow||!d||!['check','move'].includes(d.qillqa)||!p)return;
+  const r=await fetch('/api/page/edit',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({path:p,op:d.qillqa,i:d.i,to:d.to,after:!!d.after,v:d.v})});
+  if(r.status===401){location='/login';return}
+  if(!r.ok&&r.status!==409)$('#crumb').textContent='⚠ '+((await r.json()).detail||r.status);
+  f.src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()+'#qy='+(d.y|0);
+});
 addEventListener('hashchange',show);loadTree().then(show);
 </script>"""
 
