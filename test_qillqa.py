@@ -338,6 +338,12 @@ try:
 except ValueError:
     pass
 
+# round 7: one bad header candidate does not cost the other tables; a table on a list-item line
+mixed_h = "# Plan | Tasks\n---\n\na|b\n-|-\n☐|one\n☐|two"
+assert webui._kinds(mixed_h) == {0: "row", 1: "row"}, webui._kinds(mixed_h)
+li_tab = "- | Done | Task |\n  |---|---|\n  | ☐ | one |\n  | ☐ | two |"
+assert webui._kinds(li_tab) == {0: "row", 1: "row"}, webui._kinds(li_tab)
+
 # an MCP write racing a checklist edit: the shared lock makes the edit see it (409), never drop it
 import threading as _th  # noqa: E402
 cap = re.search(r'data-cap="([\w-]+)"', anon.get(c.get("/view?path=todo", follow_redirects=False)

@@ -382,11 +382,12 @@ def _md(text: str) -> str:
     return markdown.markdown(text.replace("\r\n", "\n"), extensions=["fenced_code", "tables", "toc", "sane_lists"])
 
 
-def _mark(text: str, headers: bool = False) -> str:
+def _mark(text: str, headers: set[int] | None = None) -> str:
     """Number every box in the source (a literal marker char in the source is dropped);
-    with `headers`, also tag each table header line (see _headers)."""
+    with `headers`, also tag those table header lines (see _headers)."""
     n, text = iter(range(1 << 30)), _PUA.sub("", text)
-    return _BOX.sub(lambda m: f"\ue000{next(n)}\ue001{m.group()}\ue002", _headers(text) if headers else text)
+    return _BOX.sub(lambda m: f"\ue000{next(n)}\ue001{m.group()}\ue002",
+                    _headers(text, headers) if headers else text)
 
 
 class _Kinds(HTMLParser):
@@ -452,9 +453,12 @@ class _Kinds(HTMLParser):
 
 
 def _html(text: str) -> str:
-    """Markdown with numbered boxes and tagged table headers, unless the tags would change
-    how the page renders (then no header is tagged and no row moves)."""
-    plain, tagged = _md(_mark(text)), _md(_mark(text, headers=True))
+    """Markdown with numbered boxes and tagged table headers. A header tag that would change
+    how the page renders is left out (that table then gets no drop target and no grips)."""
+    plain = _md(_mark(text))
+    clean = lambda tags: _HDR.sub("", _md(_mark(text, tags))) == plain  # noqa: E731
+    ok = {n for n in _header_lines(_PUA.sub("", text)) if clean({n})}
+    tagged = _md(_mark(text, ok)) if ok else plain
     return tagged if _HDR.sub("", tagged) == plain else plain
 
 
@@ -483,17 +487,21 @@ def _movable(text: str, kinds: dict[int, str]) -> set[int]:
 _SEPLINE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 
 
-def _headers(text: str) -> str:
-    """Tag the header line of every pipe table with its separator's line number (\ue003n\ue004)."""
+def _header_lines(text: str) -> list[int]:
+    """Separator lines of pipe-table candidates (markdown has the final word, see _html)."""
     lines = _EOL.split(text)
-    for n in range(len(lines) - 1, 0, -1):
-        if _SEPLINE.match(lines[n]) and "|" in lines[n - 1]:
+    return [n for n in range(1, len(lines)) if _SEPLINE.match(lines[n]) and "|" in lines[n - 1]]
+
+
+def _headers(text: str, only: set[int] | None = None) -> str:
+    """Tag the header line of each pipe table (or of those in `only`) with its separator's
+    line number (\ue003n\ue004), inside the first cell: after a list marker, pipe and spaces."""
+    lines, seps = _EOL.split(text), _EOL.findall(text) + [""]
+    for n in _header_lines(text):
+        if only is None or n in only:
             h = lines[n - 1]
-            k = len(h) - len(h.lstrip())
-            k += h[k:k + 1] == "|"
-            k += len(h[k:]) - len(h[k:].lstrip(" \t"))  # inside the first cell, before its text
+            k = re.match(r"\s*(?:(?:[-*+]|\d+[.)])\s+)?\|?[ \t]*", h).end()
             lines[n - 1] = f"{h[:k]}\ue003{n}\ue004{h[k:]}"
-    seps = _EOL.findall(text) + [""]
     return "".join(a + b for a, b in zip(lines, seps))
 
 
