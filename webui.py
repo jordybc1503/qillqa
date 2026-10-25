@@ -346,9 +346,9 @@ def signed_url(rel: str) -> str:
     return f"/f/{_sig(rel)}/" + "".join(urllib.parse.quote(seg) + "/" for seg in rel.split("/"))
 
 
-_HTML_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals"
-_MD_SANDBOX = "sandbox allow-popups allow-popups-to-escape-sandbox"
-_MD_LIVE_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
+_HTML_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation"
+_MD_SANDBOX = "sandbox allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+_MD_LIVE_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
 _SAFE_HEADERS = {"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 _VIDEO = r"mp4|webm|mov|m4v"
 _AUDIO = r"mp3|wav|m4a|ogg|flac|opus"
@@ -385,7 +385,7 @@ def _slugify(value: str, separator: str) -> str:
 
 
 def _md(text: str) -> str:
-    return markdown.markdown(text.replace("\r\n", "\n"), extensions=["fenced_code", "tables", "toc", "sane_lists"],
+    return markdown.markdown(text.replace("\r\n", "\n"), extensions=["fenced_code", "tables", "toc", "sane_lists", "attr_list", "md_in_html"],
                              extension_configs={"toc": {"slugify": _slugify}})
 
 
@@ -643,11 +643,27 @@ def _render_md(title: str, text: str, cap: str = "", nonce: str = "") -> str:
                   r'<video controls preload="metadata" src="\2" title="\1"></video>', body, flags=re.I)
     body = re.sub(rf'<img alt="([^"]*)" src="([^"]+\.(?:{_AUDIO}))"\s*/?>',
                   r'<audio controls preload="metadata" src="\2" title="\1"></audio>', body, flags=re.I)
-    # links leave the sandboxed page in a new tab; in-page #anchors stay put
+    # [x](#other/page) or [x](/#other/page) opens that notebook page in place (the shell
+    # follows the hash); a #heading of this page stays an in-page anchor
+    body = re.sub(r'<a href="/?#([^"]+)"', lambda m: _page_link(m, body), body)
+    # other links leave the sandboxed page in a new tab
     body = re.sub(r'<a href="(?!#)', '<a target="_blank" href="', body)
     body = body.replace("<table>", '<div class="tw"><table>').replace("</table>", "</table></div>")
     attr = f' data-cap="{cap}"' if kinds else ""
     return _shell(title, f'<article{attr}>{body}</article>')
+
+
+def _page_link(m: re.Match, body: str) -> str:
+    frag = m.group(1)
+    if f'id="{frag}"' in body:
+        return m.group(0)
+    try:
+        d = _safe(urllib.parse.unquote(html.unescape(frag)))
+    except ValueError:
+        return m.group(0)
+    if d == PAGES or not _index(d):
+        return m.group(0)
+    return f'<a target="_top" href="/#{frag}"'
 
 
 @app.get("/view")
@@ -751,7 +767,7 @@ INDEX = """
 <a href="/logout" class="out">sign out</a></header>
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
-<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals" title="page"></iframe>
+<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation" title="page"></iframe>
 <p id="empty">Pick a page or search for something.</p></section></main>
 <style>
 header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--card);
