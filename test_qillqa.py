@@ -154,6 +154,16 @@ assert '<img alt="photo" src="photo.png"' in page.text and '<video controls' in 
 md = webui._render_md("t", "## Part one\n\n[jump](#part-one) [pdf](doc.pdf)")
 assert '<a href="#part-one">' in md and '<a target="_blank" href="doc.pdf">' in md, md
 assert '<base' not in md
+# links to other notebook pages open them in place; a #heading of this page stays an anchor
+md = webui._render_md("t", "## kitchen\n\n[a](#kitchen) [b](#project%20x) [c](/#project%20x) [d](#nope/zz) [e](#../x)")
+assert '<a href="#kitchen">' in md, md  # this page's heading wins over the page "kitchen"
+assert md.count('<a target="_top" href="/#project%20x">') == 2, md
+assert '<a href="#nope/zz">' in md and '<a href="#../x">' in md, md
+assert "allow-top-navigation-by-user-activation" in page.headers["content-security-policy"]
+assert "allow-top-navigation-by-user-activation" in c.get("/").text  # the shell iframe allows it too
+# stable anchors and collapsible blocks with markdown inside
+md = webui._render_md("t", '## Tool {#tool}\n\n<details markdown="1"><summary>raw</summary>\n\n```json\n{"a": 1}\n```\n\n</details>')
+assert '<h2 id="tool">' in md and "<details>" in md and "<pre><code" in md, md
 assert anon.get(base + "photo.png").headers["content-type"] == "image/png"
 assert anon.get(base + "drawing.svg").headers["content-security-policy"] == "sandbox"
 assert "content-security-policy" not in anon.get(base + "doc.pdf").headers
