@@ -761,7 +761,7 @@ def _shell(title: str, body: str) -> str:
 
 
 INDEX = """
-<header><a href="#" class="brand">qillqa</a>
+<header><button id="side" type="button" title="Show / hide the sidebar" aria-label="Show / hide the sidebar">☰</button><a href="#" class="brand">qillqa</a>
 <input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
 <label id="scope" hidden title="Search only this folder and its subpages"><input type="checkbox" id="only"> only in <b id="scopename"></b></label>
 <a href="/logout" class="out">sign out</a></header>
@@ -780,9 +780,15 @@ border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),v
 main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 62px)}
 aside{background:#fbfcff;border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
 nav ul{list-style:none;margin:0;padding-left:14px}nav>ul{padding-left:0}
-nav a{display:block;padding:4px 8px;border-radius:6px;color:var(--fg);text-decoration:none;overflow-wrap:anywhere}
+#side{background:none;border:0;color:var(--mute);font-size:1.2em;padding:2px 6px;cursor:pointer}#side:hover{color:var(--c3)}
+body.noside main{grid-template-columns:1fr}body.noside aside{display:none}
+.row{display:flex;align-items:center}.fold,.leaf{flex:none;width:20px}
+.fold{background:none;border:0;padding:0;color:var(--mute);cursor:pointer;line-height:1;transition:transform .15s}
+.fold:hover{color:var(--c3)}li.open>.row>.fold{transform:rotate(90deg)}nav li>ul{display:none}nav li.open>ul{display:block}
+nav a{flex:1;min-width:0;display:block;padding:4px 8px;border-radius:6px;color:var(--fg);text-decoration:none;overflow-wrap:anywhere}
 nav a:hover{background:color-mix(in srgb,var(--c3) 8%,#fff)}
 nav a.sec{color:var(--c1);font-weight:600}
+nav a.in{color:var(--c3)}
 nav a.on{background:color-mix(in srgb,var(--c3) 14%,#fff);color:color-mix(in srgb,var(--c3) 80%,#000);font-weight:600;
 box-shadow:inset 3px 0 0 var(--c3)}
 section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;width:100%;background:var(--bg)}
@@ -793,24 +799,37 @@ section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;wi
 .hit b{color:var(--c3)}.hit small{color:var(--c1);display:block}
 @media (max-width:760px){header{flex-wrap:wrap}#scope{order:3;max-width:100%}
 main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
-#toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
+#side{display:none}#toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
 nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
 </style>
 <script>
 const $ = s => document.querySelector(s);
 function mk(tag, props, ...kids){const e=Object.assign(document.createElement(tag),props);e.append(...kids);return e}
 async function api(u){const r=await fetch(u);if(r.status===401)location='/login';return r.json()}
+function load(k,d){try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}}
+function save(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
+// folders start collapsed; the ones the user opens are remembered
+const opened=new Set(load('qillqa.open',[]));
 function renderTree(nodes){
   const ul=mk('ul');
   for(const n of nodes){
     const a=mk('a',{href:'#'+n.path,className:n.page?'':'sec',textContent:n.title});a.dataset.path=n.path;
-    const li=mk('li',{},a);if(n.children.length)li.append(renderTree(n.children));ul.append(li);
+    const li=mk('li');
+    if(n.children.length){
+      const b=mk('button',{type:'button',className:'fold',textContent:'▸',title:'Expand / collapse'});
+      const set=on=>{li.classList.toggle('open',on);b.setAttribute('aria-expanded',on)};set(opened.has(n.path));
+      b.onclick=()=>{const on=!li.classList.contains('open');set(on);
+        on?opened.add(n.path):opened.delete(n.path);save('qillqa.open',[...opened])};
+      li.append(mk('div',{className:'row'},b,a),renderTree(n.children));
+    }else li.append(mk('div',{className:'row'},mk('span',{className:'leaf'}),a));
+    ul.append(li);
   }
   return ul;
 }
 async function loadTree(){$('#tree').replaceChildren(renderTree(await api('/api/tree')));mark()}
 function mark(){const p=decodeURIComponent(location.hash.slice(1));
-  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.path===p))}
+  document.querySelectorAll('nav a').forEach(a=>{a.classList.toggle('on',a.dataset.path===p);
+    a.classList.toggle('in',!!p&&p.startsWith(a.dataset.path+'/'))})}  // 'in': holds the open page
 let scope='';
 async function show(){
   const p=decodeURIComponent(location.hash.slice(1));mark();
@@ -832,6 +851,8 @@ async function find(){
 }
 $('#only').onchange=()=>{scope=$('#only').checked?decodeURIComponent(location.hash.slice(1)):'';show();find()};
 $('#toggle').onclick=()=>$('nav').classList.toggle('open');
+document.body.classList.toggle('noside',load('qillqa.noside',false));
+$('#side').onclick=()=>save('qillqa.noside',document.body.classList.toggle('noside'));
 // checklist pages post {qillqa: check|move} here; only the shown page, only its own iframe
 addEventListener('message',async e=>{
   const f=$('#page'),d=e.data,p=decodeURIComponent(location.hash.slice(1));

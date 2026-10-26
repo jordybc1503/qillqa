@@ -36,6 +36,9 @@ tmp = Path(tempfile.mkdtemp())
 (tmp / "plan").mkdir()
 md = tmp / "plan" / "index.md"
 md.write_text(PAGE)
+for sub in ("proj", "proj/sub"):  # a folder with a subpage, for the sidebar tree
+    (tmp / sub).mkdir()
+    (tmp / sub / "index.md").write_text(f"# {sub}\n")
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -58,6 +61,30 @@ try:
         pg.goto(base + "/login")
         pg.fill("input[name=token]", "browser-tok")
         pg.click("button")
+        # sidebar: folders start collapsed, the user opens them, the choice survives a reload
+        pg.goto(base + "/#plan")
+        sub, fold = pg.locator('nav a[data-path="proj/sub"]'), pg.locator('nav a[data-path="proj"]').locator("xpath=../button")
+        pg.locator('nav a[data-path="proj"]').wait_for()
+        assert sub.is_hidden(), "folders should start collapsed"
+        fold.click()
+        assert sub.is_visible() and fold.get_attribute("aria-expanded") == "true", "fold did not open"
+        pg.reload()
+        sub.wait_for()
+        assert sub.is_visible(), "opened folder not remembered"
+        fold.click()
+        assert sub.is_hidden(), "fold did not close"
+        pg.goto(base + "/#proj/sub")
+        assert "in" in pg.locator('nav a[data-path="proj"]').get_attribute("class"), "collapsed parent not marked"
+        pg.click("#side")
+        assert pg.locator("aside").is_hidden(), "sidebar did not hide"
+        pg.reload()
+        assert pg.locator("aside").is_hidden(), "hidden sidebar not remembered"
+        assert pg.evaluate("document.querySelector('section').getBoundingClientRect().left") < 5, "page did not take the width"
+        pg.click("#side")
+        assert pg.locator("aside").is_visible(), "sidebar did not come back"
+        pg.set_viewport_size({"width": 390, "height": 800})
+        assert pg.evaluate("document.documentElement.scrollWidth") <= 390, "overflow at 390 px"
+        pg.set_viewport_size({"width": 1200, "height": 800})
         pg.goto(base + "/#plan")
         fr = pg.frame_locator("#page")
         frame = lambda: pg.frames[1]  # noqa: E731
