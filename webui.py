@@ -808,7 +808,7 @@ nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
 /* phones: only the page; a small floating ☰ brings back header + pages */
 @media (max-width:760px){#menu{display:flex;align-items:center;justify-content:center;position:fixed;right:12px;bottom:12px;z-index:10;width:44px;height:44px;padding:0;border-radius:50%;font-size:1.2em;color:var(--fg);background:var(--card);border:1px solid var(--line);box-shadow:0 2px 10px #0003;opacity:.85}
 body:not(.bar) header,body:not(.bar) aside,body:not(.bar) #crumb,body:not(.bar) #results{display:none}
-header:not(.searching) .out{margin-left:0}#toggle{display:none}nav{display:block}aside{max-height:50vh}iframe{height:100vh;height:100dvh}}
+#find{display:none}header:not(.searching) #q{display:block}header:not(.searching) #scope:not([hidden]){display:inline}#toggle{display:none}nav{display:block}aside{max-height:50vh}iframe{height:100vh;height:100dvh}}
 </style>
 <script>
 const $ = s => document.querySelector(s);

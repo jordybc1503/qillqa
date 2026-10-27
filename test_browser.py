@@ -103,7 +103,10 @@ try:
         assert pg.evaluate("document.querySelector('#page').offsetHeight") >= 790, "page does not fill the phone"
         pg.click("#menu")
         assert pg.locator("header").is_visible() and pg.locator('nav a[data-path="plan"]').is_visible(), "☰ did not open the bar"
-        assert pg.evaluate("document.querySelector('header').offsetHeight") < 70, "folded header wraps on a phone"
+        assert pg.locator("#q").is_visible() and pg.locator("#find").is_hidden(), "phone bar should show the search field at once"
+        top = lambda sel: pg.evaluate(f"document.querySelector('{sel}').getBoundingClientRect().top")  # noqa: E731
+        assert abs(top(".brand") - top(".out")) < 12 and top("#q") > top(".out"), "brand + sign out on one row, field below"
+        assert pg.evaluate("document.querySelector('#q').offsetWidth") > 340, "field does not take the row"
         assert pg.evaluate("document.documentElement.scrollWidth") <= 390, "overflow at 390 px with the bar open"
         pg.click('nav a[data-path="plan"]')
         assert pg.locator("header").is_hidden(), "picking a page did not close the bar"
