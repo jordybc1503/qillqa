@@ -762,6 +762,7 @@ def _shell(title: str, body: str) -> str:
 
 INDEX = """
 <header><button id="side" type="button" title="Show / hide the sidebar" aria-label="Show / hide the sidebar">☰</button><a href="#" class="brand">qillqa</a>
+<button id="find" type="button" title="Search (/)" aria-label="Search">🔍</button>
 <input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
 <label id="scope" hidden title="Search only this folder and its subpages"><input type="checkbox" id="only"> only in <b id="scopename"></b></label>
 <a href="/logout" class="out">sign out</a></header>
@@ -780,7 +781,8 @@ border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),v
 main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 62px)}
 aside{background:#fbfcff;border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
 nav ul{list-style:none;margin:0;padding-left:14px}nav>ul{padding-left:0}
-#side{background:none;border:0;color:var(--mute);font-size:1.2em;padding:2px 6px;cursor:pointer}#side:hover{color:var(--c3)}
+#side,#find{background:none;border:0;color:var(--mute);font-size:1.2em;padding:2px 6px;cursor:pointer}#side:hover,#find:hover{color:var(--c3)}
+#find{margin-left:auto}#q,#find{height:46px}header.searching #find,header:not(.searching) #q,header:not(.searching) #scope{display:none}
 body.noside main{grid-template-columns:1fr}body.noside aside{display:none}
 .row{display:flex;align-items:center}.fold,.leaf{flex:none;width:20px}
 .fold{background:none;border:0;padding:0;color:var(--mute);cursor:pointer;line-height:1;transition:transform .15s}
@@ -797,7 +799,7 @@ section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;wi
 .hit{display:block;padding:10px 12px;margin:6px 0;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none}
 .hit:hover{border-color:var(--c3);background:color-mix(in srgb,var(--c3) 5%,#fff)}
 .hit b{color:var(--c3)}.hit small{color:var(--c1);display:block}
-@media (max-width:760px){header{flex-wrap:wrap}#scope{order:3;max-width:100%}
+@media (max-width:760px){header{flex-wrap:wrap}#q{order:2;flex-basis:100%}.out{margin-left:auto}#scope{order:3;max-width:100%}
 main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
 #side{display:none}#toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
 nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
@@ -839,6 +841,13 @@ async function show(){
   $('#page').src='/view?path='+encodeURIComponent(p);$('nav').classList.remove('open');
 }
 let t;
+// the search box stays folded behind 🔍 until used; empty and unfocused = folded again
+const head=$('header');
+function openFind(){head.classList.add('searching');$('#q').focus()}
+$('#find').onclick=openFind;
+head.addEventListener('focusout',e=>{if(!head.contains(e.relatedTarget)&&!$('#q').value.trim())head.classList.remove('searching')});
+$('#q').addEventListener('keydown',e=>{if(e.key==='Escape'){$('#q').value='';find();$('#q').blur();head.classList.remove('searching')}});
+addEventListener('keydown',e=>{if(e.key==='/'&&!head.classList.contains('searching')&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();openFind()}});
 $('#q').addEventListener('input',()=>{clearTimeout(t);t=setTimeout(find,400)});
 async function find(){
   const q=$('#q').value.trim(),box=$('#results');
