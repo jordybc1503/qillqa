@@ -97,8 +97,16 @@ try:
         assert pg.locator("#q").is_visible(), "/ did not open the box"
         pg.locator("nav a").first.focus()  # focus leaves an empty box -> it folds
         assert pg.locator("#q").is_hidden(), "empty box did not fold on blur"
+        # phone: only the page; the floating ☰ brings back header + pages, picking a page hides them again
         pg.set_viewport_size({"width": 390, "height": 800})
+        assert pg.locator("header").is_hidden() and pg.locator("aside").is_hidden(), "phone should show only the page"
+        assert pg.evaluate("document.querySelector('#page').offsetHeight") >= 790, "page does not fill the phone"
+        pg.click("#menu")
+        assert pg.locator("header").is_visible() and pg.locator('nav a[data-path="plan"]').is_visible(), "☰ did not open the bar"
         assert pg.evaluate("document.querySelector('header').offsetHeight") < 70, "folded header wraps on a phone"
+        assert pg.evaluate("document.documentElement.scrollWidth") <= 390, "overflow at 390 px with the bar open"
+        pg.click('nav a[data-path="plan"]')
+        assert pg.locator("header").is_hidden(), "picking a page did not close the bar"
         pg.set_viewport_size({"width": 1200, "height": 800})
         pg.goto(base + "/#plan")
         fr = pg.frame_locator("#page")

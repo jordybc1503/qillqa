@@ -766,6 +766,7 @@ INDEX = """
 <input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
 <label id="scope" hidden title="Search only this folder and its subpages"><input type="checkbox" id="only"> only in <b id="scopename"></b></label>
 <a href="/logout" class="out">sign out</a></header>
+<button id="menu" type="button" aria-label="Menu" title="Menu">☰</button>
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
 <iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation" title="page"></iframe>
@@ -803,6 +804,11 @@ section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;wi
 main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
 #side{display:none}#toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
 nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
+#menu{display:none}
+/* phones: only the page; a small floating ☰ brings back header + pages */
+@media (max-width:760px){#menu{display:flex;align-items:center;justify-content:center;position:fixed;right:12px;bottom:12px;z-index:10;width:44px;height:44px;padding:0;border-radius:50%;font-size:1.2em;color:var(--fg);background:var(--card);border:1px solid var(--line);box-shadow:0 2px 10px #0003;opacity:.85}
+body:not(.bar) header,body:not(.bar) aside,body:not(.bar) #crumb,body:not(.bar) #results{display:none}
+header:not(.searching) .out{margin-left:0}#toggle{display:none}nav{display:block}aside{max-height:50vh}iframe{height:100vh;height:100dvh}}
 </style>
 <script>
 const $ = s => document.querySelector(s);
@@ -873,6 +879,9 @@ addEventListener('message',async e=>{
   if(!r.ok&&r.status!==409)$('#crumb').textContent='⚠ '+((await r.json()).detail||r.status);
   f.src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()+'#qy='+(d.y|0);
 });
+const bar=on=>{document.body.classList.toggle('bar',on);$('#menu').textContent=on?'✕':'☰'};
+$('#menu').onclick=()=>bar(!document.body.classList.contains('bar'));
+addEventListener('hashchange',()=>bar(false));  // picked a page: back to reading
 addEventListener('hashchange',show);loadTree().then(show);
 </script>"""
 
