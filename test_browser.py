@@ -85,6 +85,21 @@ try:
         pg.set_viewport_size({"width": 390, "height": 800})
         assert pg.evaluate("document.documentElement.scrollWidth") <= 390, "overflow at 390 px"
         pg.set_viewport_size({"width": 1200, "height": 800})
+        # search box: folded behind 🔍 until used; the header keeps its height (main is sized from it)
+        h0 = pg.evaluate("document.querySelector('header').offsetHeight")
+        assert pg.locator("#q").is_hidden() and pg.locator("#find").is_visible(), "search box should start folded"
+        pg.click("#find")
+        assert pg.locator("#q").is_visible() and pg.evaluate("document.activeElement.id") == "q", "🔍 did not open the box"
+        assert pg.evaluate("document.querySelector('header').offsetHeight") == h0, "header height jumps when the box opens"
+        pg.keyboard.press("Escape")
+        assert pg.locator("#q").is_hidden(), "Esc did not fold the box"
+        pg.keyboard.press("/")
+        assert pg.locator("#q").is_visible(), "/ did not open the box"
+        pg.locator("nav a").first.focus()  # focus leaves an empty box -> it folds
+        assert pg.locator("#q").is_hidden(), "empty box did not fold on blur"
+        pg.set_viewport_size({"width": 390, "height": 800})
+        assert pg.evaluate("document.querySelector('header').offsetHeight") < 70, "folded header wraps on a phone"
+        pg.set_viewport_size({"width": 1200, "height": 800})
         pg.goto(base + "/#plan")
         fr = pg.frame_locator("#page")
         frame = lambda: pg.frames[1]  # noqa: E731
