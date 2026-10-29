@@ -449,6 +449,159 @@ def preview_ui() -> str:
     return PREVIEW_HTML
 
 
+# ---------------------------------------------------------------- live view (MCP App)
+# show_page opens LIVE_UI in hosts that render MCP Apps (Claude Desktop): the
+# page's real HTML in a sandboxed frame, refreshed by the app-only tool
+# page_snapshot whenever the page's files change. The HTML is self-contained
+# (scripts, styles and media of the page folder inlined), because the host's
+# CSP only lets the app load what it declares.
+
+LIVE_UI = "ui://qillqa/live"
+LIVE_CSP = {"resourceDomains": ["https://fonts.googleapis.com", "https://fonts.gstatic.com",
+                                "https://cdnjs.cloudflare.com", "https://cdn.jsdelivr.net", "https://unpkg.com"]}
+_SCRIPT_SRC = re.compile(r'<script\b([^>]*?)\bsrc="([^"#?:]+)"([^>]*)>\s*</script>', re.I)
+_STYLESHEET = re.compile(r'<link\b(?=[^>]*\brel="stylesheet")[^>]*\bhref="([^"#?:]+)"[^>]*>', re.I)
+_MEDIA_SRC = re.compile(r'(<(?:img|source|video|audio)\b[^>]*?\b(?:src|poster)=")([^"#?:]+)(")', re.I)
+MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+        ".webp": "image/webp", ".svg": "image/svg+xml", ".mp4": "video/mp4", ".webm": "video/webm",
+        ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav", ".ogg": "audio/ogg"}
+
+
+def _version(d: Path) -> str:
+    """Changes whenever a file of the page (not its subpages) changes."""
+    return str(max((f.stat().st_mtime_ns for f in d.iterdir() if f.is_file()), default=0))
+
+
+def _standalone_html(path: str) -> tuple[str, str, str]:
+    """(html, page path, title): the page as the web UI renders it, with the
+    page folder's scripts, stylesheets and media inlined."""
+    url, rel, title = _signed_page_url(path)
+    d = _safe(rel)
+    with urllib.request.urlopen(url, timeout=10) as r:
+        html = r.read().decode("utf-8", "replace")
+
+    def local(name: str) -> Path | None:
+        f = (d / urllib.parse.unquote(name)).resolve()
+        return f if f.is_file() and d in f.parents else None
+
+    def script(m: re.Match) -> str:
+        f = local(m.group(2))
+        if not f:
+            return m.group(0)
+        code = f.read_text("utf-8", "replace").replace("</script", "<\\/script")
+        return f"<script{m.group(1)}{m.group(3)}>{code}</script>"
+
+    def style(m: re.Match) -> str:
+        f = local(m.group(1))
+        return f"<style>{f.read_text('utf-8', 'replace')}</style>" if f else m.group(0)
+
+    def media(m: re.Match) -> str:
+        f = local(m.group(2))
+        if not f or f.suffix.lower() not in MIME:
+            return m.group(0)
+        data = base64.b64encode(f.read_bytes()).decode()
+        return f"{m.group(1)}data:{MIME[f.suffix.lower()]};base64,{data}{m.group(3)}"
+
+    html = _MEDIA_SRC.sub(media, _STYLESHEET.sub(style, _SCRIPT_SRC.sub(script, html)))
+    return html, rel, title
+
+
+LIVE_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<style>html,body{margin:0;height:100%;font:13px/1.4 system-ui,sans-serif;color:#17201d;background:#fff}
+body{display:flex;flex-direction:column}
+#bar{display:flex;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid #e3e8e5}
+#t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+#state{color:#5d6a65}
+button{font:inherit;padding:4px 10px;border:1px solid #c9d1cd;border-radius:6px;background:#f6f7f6;cursor:pointer}
+#view{flex:1;width:100%;min-height:640px;border:0}</style></head><body>
+<div id="bar"><span id="t">qillqa</span><span id="state"></span>
+<button id="full">Fullscreen</button><button id="open" hidden>Open in qillqa</button></div>
+<iframe id="view" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe>
+<script>
+const [title, state, view, fullBtn, openBtn] = ["t", "state", "view", "full", "open"].map(id => document.getElementById(id));
+let seq = 0, page = null, version = null, url = "", timer = null;
+const pending = {};
+const send = m => parent.postMessage(Object.assign({jsonrpc: "2.0"}, m), "*");
+const request = (method, params) => new Promise((ok, fail) => {
+  const id = ++seq; pending[id] = {ok, fail}; send({id, method, params}); });
+function show(s) {
+  if (!s || !s.html) return;
+  title.textContent = s.title || s.path; version = s.version; view.srcdoc = s.html;
+  state.textContent = "live · updated " + new Date().toLocaleTimeString();
+}
+async function poll() {
+  if (!page || document.hidden) return;
+  try {
+    const r = await request("tools/call", {name: "page_snapshot", arguments: {path: page, since: version}});
+    const s = r && r.structuredContent;
+    if (s && s.changed) show(s);
+  } catch (e) { state.textContent = "offline: " + e; }
+}
+addEventListener("message", e => {
+  if (e.source !== parent) return;
+  const m = e.data || {};
+  if (m.id && pending[m.id]) {
+    const p = pending[m.id]; delete pending[m.id];
+    m.error ? p.fail(m.error.message || "error") : p.ok(m.result); return;
+  }
+  if (m.method !== "ui/notifications/tool-result") return;
+  const s = (m.params || {}).structuredContent || {};
+  page = s.path; url = s.url || ""; openBtn.hidden = !url; show(s);
+  clearInterval(timer); timer = setInterval(poll, 2000);
+});
+fullBtn.onclick = () => request("ui/request-display-mode", {mode: "fullscreen"});
+openBtn.onclick = () => request("ui/open-link", {url});
+request("ui/initialize", {appInfo: {name: "qillqa-live", version: "1"},
+  appCapabilities: {availableDisplayModes: ["inline", "fullscreen"]}, protocolVersion: "2026-01-26"})
+  .then(() => send({method: "ui/notifications/initialized"}));
+</script></body></html>"""
+
+
+def _snapshot(path: str, since: str = "") -> dict:
+    d = _safe(path)
+    if not _index(d):
+        raise ValueError(f"no page at {path!r}")
+    v = _version(d)
+    if since and since == v:
+        return {"changed": False, "version": v}
+    html, rel, title = _standalone_html(path)
+    return {"changed": True, "version": v, "path": rel, "title": title, "html": html, "url": f"{URL}/#{rel}"}
+
+
+def _app_result(fn, *a) -> CallToolResult:
+    """Text for the model, the page for the app (structuredContent stays out of the model's context)."""
+    try:
+        s = fn(*a)
+    except Exception as e:
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": str(e)}))], isError=True)
+    brief = {k: v for k, v in s.items() if k != "html"}
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(brief, ensure_ascii=False))],
+                          structuredContent=s)
+
+
+@mcp.tool(meta={"ui": {"resourceUri": LIVE_UI}})
+async def show_page(path: str) -> CallToolResult:
+    """Show a qillqa page LIVE to the user, as an interactive view (MCP App)
+    in hosts that render MCP Apps, such as Claude Desktop. The view reloads
+    by itself whenever the page changes, so the user watches your edits
+    land. In hosts without MCP Apps (Claude Code) it only returns the page's
+    title, version and URL; to look at a page yourself use preview_page."""
+    return await asyncio.to_thread(_app_result, _snapshot, path)
+
+
+@mcp.tool(meta={"ui": {"resourceUri": LIVE_UI, "visibility": ["app"]}})
+async def page_snapshot(path: str, since: str = "") -> CallToolResult:
+    """For the live view only: the page's self-contained HTML if it changed
+    since version `since`, else {changed: false}."""
+    return await asyncio.to_thread(_app_result, _snapshot, path, since)
+
+
+@mcp.resource(LIVE_UI, name="qillqa-live", mime_type="text/html;profile=mcp-app",
+              meta={"ui": {"csp": LIVE_CSP, "prefersBorder": True}})
+def live_ui() -> str:
+    return LIVE_HTML
+
+
 @mcp.tool()
 def start_server() -> str:
     """Start the local qillqa web server (browse and search pages) and return its URL."""

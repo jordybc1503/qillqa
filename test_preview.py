@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import struct
+import time
 import tempfile
 from pathlib import Path
 
@@ -106,6 +107,60 @@ try:
         assert got[:2] == ["ui/initialize", "ui/notifications/initialized"], got
         assert "ui/notifications/size-changed" in got, got
         b.close()
-    print("OK: preview_page renders md and html pages, flags overflow, and its MCP App works in a mock host")
+    # show_page: tool/resource metadata, the app-only snapshot tool, then the live view
+    # in a mock host that applies the spec's default CSP and serves tools/call.
+    LIVE = "ui://qillqa/live"
+    assert tools["show_page"].meta == {"ui": {"resourceUri": LIVE}}
+    assert tools["page_snapshot"].meta == {"ui": {"resourceUri": LIVE, "visibility": ["app"]}}
+    live = list(asyncio.run(server.mcp.read_resource(LIVE)))[0]
+    assert live.mime_type == "text/html;profile=mcp-app" and "page_snapshot" in live.content
+    (tmp / "pages" / "wide" / "app.js").write_text('document.body.insertAdjacentHTML("beforeend","<p id=js>js ran</p>")')
+    (tmp / "pages" / "wide" / "dot.png").write_bytes(__import__("base64").b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))
+    server.write_page("wide", '<!doctype html><title>Wide</title><p id=v>one</p><img id=dot src="dot.png">'
+                              '<script src="app.js"></script>', "html", create=False)
+    shown = asyncio.run(server.show_page("wide"))
+    s = shown.structuredContent
+    assert not shown.isError and "html" not in shown.content[0].text, shown.content  # page HTML stays out of the model
+    assert "js ran" in s["html"] and 'src="data:image/png;base64,' in s["html"], s["html"][:300]
+    same = asyncio.run(server.page_snapshot("wide", s["version"])).structuredContent
+    assert same == {"changed": False, "version": s["version"]}, same
+
+    csp = ('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'self\' '
+           '\'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; media-src \'self\' data:; '
+           'connect-src \'none\'">')
+    live_doc = live.content.replace("<head>", "<head>" + csp, 1)
+    host = """<iframe id="app" style="width:700px;height:500px"></iframe><script>
+    const app = document.getElementById("app");
+    const reply = (id, result) => app.contentWindow.postMessage({jsonrpc: "2.0", id, result}, "*");
+    addEventListener("message", async e => {
+      if (e.source !== app.contentWindow) return;
+      const m = e.data;
+      if (m.method === "ui/initialize") reply(m.id, {protocolVersion: "2026-01-26", hostCapabilities: {}});
+      if (m.method === "ui/notifications/initialized") app.contentWindow.postMessage({jsonrpc: "2.0",
+        method: "ui/notifications/tool-result", params: __RESULT__}, "*");
+      if (m.method === "tools/call") reply(m.id, await window.snap(m.params.arguments));
+    });
+    app.srcdoc = __UI__;
+    </script>""".replace("__UI__", json.dumps(live_doc).replace("</", "<\\/")).replace(
+        "__RESULT__", json.dumps(shown.model_dump(by_alias=True, exclude_none=True)).replace("</", "<\\/"))
+    with sync_playwright() as p:
+        kw = {"executable_path": server.CHROME} if os.path.exists(server.CHROME) else {}
+        b = p.chromium.launch(args=["--no-sandbox"], **kw)
+        pg = b.new_page()
+        pg.expose_function("snap", lambda a: server._app_result(server._snapshot, a["path"], a.get("since", ""))
+                           .model_dump(by_alias=True, exclude_none=True))  # page_snapshot's sync core
+        pg.set_content(host)
+        view = pg.frame_locator("#app").frame_locator("#view")
+        assert view.locator("#v").inner_text() == "one"
+        assert view.locator("#js").inner_text() == "js ran"  # inlined script ran under the host CSP
+        assert view.locator("#dot").evaluate("i => i.naturalWidth") == 1  # inlined image loaded
+        time.sleep(0.05)
+        server.write_page("wide", '<!doctype html><title>Wide</title><p id=v>two</p>', "html", create=False)
+        view.locator("#v", has_text="two").wait_for(timeout=8000)  # the view reloaded by itself
+        assert "live" in pg.frame_locator("#app").locator("#state").inner_text()
+        b.close()
+    print("OK: preview_page renders md and html pages, flags overflow; both MCP Apps work in a mock host,"
+          " and the live view follows edits")
 finally:
     server.stop()
