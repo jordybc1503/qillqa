@@ -11,6 +11,8 @@ the MCP handshake and webui.py imports it.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import contextlib
 import fcntl
 import functools
@@ -28,6 +30,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / ".env")
@@ -335,6 +338,115 @@ def move_page(src: str, dst: str) -> str:
 def delete_page(path: str, recursive: bool = False) -> str:
     """Delete a qillqa page. If it has subpages, recursive=True is required."""
     return _write(_delete, path, recursive)
+
+
+# ---------------------------------------------------------------- preview
+# One tool, two audiences: the PNG in `content` is what the model sees (Claude
+# Code shows tool images inline), and MCP Apps hosts (Claude Desktop) also
+# render PREVIEW_UI with that same image. The UI gets the image from the tool
+# result, never live HTML: the host's default CSP blocks the page's own assets.
+
+PREVIEW_UI = "ui://qillqa/preview"
+CHROME = os.path.expanduser(os.environ.get("QILLQA_CHROME", "~/.local/opt/google-chrome/chrome"))
+MAX_PREVIEW_HEIGHT = 8000  # ponytail: very long pages are cut here; scroll offsets if ever needed
+
+PREVIEW_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<style>body{margin:0;font:13px/1.4 system-ui,sans-serif;color:#17201d;background:#fff}
+#bar{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:6px 8px}
+#t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+button{font:inherit;padding:4px 10px;border:1px solid #c9d1cd;border-radius:6px;background:#f6f7f6;cursor:pointer}
+img{display:block;width:100%;height:auto}</style></head><body>
+<div id="bar"><span id="t">qillqa preview</span><button id="open" hidden>Open in qillqa</button></div>
+<img id="img" alt="">
+<script>
+const [title, openBtn, shotImg] = ["t", "open", "img"].map(id => document.getElementById(id));
+let seq = 0, url = "";
+const pending = {};
+const send = m => parent.postMessage(Object.assign({jsonrpc: "2.0"}, m), "*");
+const request = (method, params) => new Promise(r => { const id = ++seq; pending[id] = r; send({id, method, params}); });
+const size = () => send({method: "ui/notifications/size-changed",
+  params: {width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight}});
+addEventListener("message", e => {
+  if (e.source !== parent) return;
+  const m = e.data || {};
+  if (m.id && pending[m.id]) { pending[m.id](m.result); delete pending[m.id]; return; }
+  if (m.method !== "ui/notifications/tool-result") return;
+  const p = m.params || {}, s = p.structuredContent || {};
+  const shot = (p.content || []).find(c => c.type === "image");
+  if (shot) shotImg.src = "data:" + shot.mimeType + ";base64," + shot.data;
+  title.textContent = s.title || "qillqa preview";
+  url = s.url || "";
+  openBtn.hidden = !url;
+  size();
+});
+shotImg.onload = size;
+openBtn.onclick = () => request("ui/open-link", {url});
+request("ui/initialize", {appInfo: {name: "qillqa-preview", version: "1"}, appCapabilities: {},
+  protocolVersion: "2026-01-26"}).then(() => send({method: "ui/notifications/initialized"}));
+</script></body></html>"""
+
+
+def _signed_page_url(path: str) -> tuple[str, str, str]:
+    """(absolute signed /f/ URL, page path, title). /view redirects to it."""
+    d = _safe(path)
+    if not _index(d):
+        raise ValueError(f"no page at {path!r}")
+    start()
+    q = urllib.parse.urlencode({"path": _rel(d)})
+    req = urllib.request.Request(f"{URL}/view?{q}", headers={"Authorization": f"Bearer {TOKEN}"})
+    with urllib.request.urlopen(req, timeout=10) as r:  # follows the 303 to /f/<sig>/...
+        return r.geturl(), _rel(d), _title(d)
+
+
+async def _screenshot(url: str, width: int) -> tuple[bytes, int, int]:
+    """Full-page PNG at `width` px, plus the page's height and scroll width."""
+    from playwright.async_api import async_playwright  # heavy: only when previewing
+
+    async with async_playwright() as p:
+        kw = {"executable_path": CHROME} if os.path.exists(CHROME) else {}
+        browser = await p.chromium.launch(args=["--no-sandbox"], **kw)
+        try:
+            page = await browser.new_page(viewport={"width": width, "height": 900})
+            await page.goto(url, wait_until="load")
+            await page.wait_for_timeout(400)  # inline chart scripts draw after load
+            height, scroll = await page.evaluate(
+                "[document.documentElement.scrollHeight, document.documentElement.scrollWidth]")
+            png = await page.screenshot(full_page=height <= MAX_PREVIEW_HEIGHT,
+                                        clip=None if height <= MAX_PREVIEW_HEIGHT else
+                                        {"x": 0, "y": 0, "width": width, "height": MAX_PREVIEW_HEIGHT})
+        finally:
+            await browser.close()
+    return png, height, scroll
+
+
+@mcp.tool(meta={"ui": {"resourceUri": PREVIEW_UI}})
+async def preview_page(path: str, width: int = 1100) -> CallToolResult:
+    """Screenshot of a qillqa page as it renders in the browser, to check a
+    page you wrote (charts, tables, layout) before sharing it. `width` in px:
+    1100 desktop (default), 390 phone. Returns the PNG plus JSON with the
+    page height and whether it scrolls sideways (horizontal_overflow).
+    Pages taller than 8000 px are cut there. Starts the local server if needed."""
+    try:
+        if not 200 <= width <= 2400:
+            raise ValueError("width must be between 200 and 2400 px")
+        url, rel, title = await asyncio.to_thread(_signed_page_url, path)
+        png, height, scroll = await _screenshot(url, width)
+    except Exception as e:
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": str(e)}))],
+                              isError=True)
+    info = {"path": rel, "title": title, "width": width, "height": height,
+            "horizontal_overflow": scroll > width, "cut_at": MAX_PREVIEW_HEIGHT if height > MAX_PREVIEW_HEIGHT else None,
+            "url": f"{URL}/#{rel}"}
+    return CallToolResult(
+        content=[ImageContent(type="image", data=base64.b64encode(png).decode(), mimeType="image/png"),
+                 TextContent(type="text", text=json.dumps(info, ensure_ascii=False))],
+        structuredContent=info)
+
+
+@mcp.resource(PREVIEW_UI, name="qillqa-preview", mime_type="text/html;profile=mcp-app",
+              meta={"ui": {"prefersBorder": True}})
+def preview_ui() -> str:
+    return PREVIEW_HTML
 
 
 @mcp.tool()

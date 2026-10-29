@@ -6,3 +6,4 @@ numpy>=1.26
 markdown>=3.5
 sentence-transformers>=2.7
 transformers>=4.51
+playwright>=1.44  # preview_page; uses $QILLQA_CHROME or `playwright install chromium`
