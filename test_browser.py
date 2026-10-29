@@ -56,7 +56,8 @@ try:
         except OSError:
             time.sleep(0.2)
     with sync_playwright() as p:
-        b = p.chromium.launch()
+        chrome = os.path.expanduser(os.environ.get("QILLQA_CHROME", "~/.local/opt/google-chrome/chrome"))
+        b = p.chromium.launch(**({"executable_path": chrome} if os.path.exists(chrome) else {}))
         pg = b.new_page(viewport={"width": 1200, "height": 800})
         pg.goto(base + "/login")
         pg.fill("input[name=token]", "browser-tok")

@@ -7,6 +7,7 @@ A local notebook of nested pages with an MCP server, a web UI and local semantic
   - Writing: `create_page`, `update_page`, `attach_file`, `get_page`, `list_pages`, `move_page`, `delete_page`. Writes go straight to disk and need no server.
   - Searching: `search`. Pass an optional `path` to search only one folder (every folder can act as a project). Starts the server only if needed.
   - Server: `start_server`, `server_status`, `stop_server`.
+  - Preview: `preview_page(path, width=1100)` returns a full-page PNG of how the page renders (390 = phone) plus its height and whether it scrolls sideways, so the agent can check a page before sharing it. Claude Code shows the image to the model. It is also an **MCP App**: hosts that render MCP Apps (Claude Desktop) show the screenshot inline with an "Open in qillqa" button (`ui://qillqa/preview`). Needs `playwright`; it uses Chrome at `QILLQA_CHROME` (default `~/.local/opt/google-chrome/chrome`) or Playwright's own Chromium.
 - **Web UI** (`webui.py`): `http://127.0.0.1:47391`, with sign-in by the token in `.env`. Shows the page tree, the pages and search.
   - Next to the search box, **only in &lt;folder&gt;** limits the search to the folder you are viewing.
   - Every page renders sandboxed (CSP sandbox), so its JS cannot use your session.
@@ -50,6 +51,7 @@ The first time, Tailscale asks you to enable "Serve" on your tailnet. If you cha
 ## Test
 ```bash
 .venv/bin/python test_qillqa.py     # checks with a fake embedder, no model needed
+.venv/bin/python test_preview.py    # preview_page screenshots + its MCP App in a mock host
 python test_browser.py              # checklists in Chromium (any python with playwright; skips without it)
 claude mcp list                     # qillqa should show "Connected"
 ```
