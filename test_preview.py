@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import struct
 import time
 import tempfile
@@ -15,7 +17,8 @@ sock = socket.socket()
 sock.bind(("127.0.0.1", 0))
 PORT = sock.getsockname()[1]
 sock.close()
-os.environ.update(QILLQA_PAGES_DIR=str(tmp / "pages"), QILLQA_TOKEN="t0k-preview", QILLQA_PORT=str(PORT))
+os.environ.update(QILLQA_PAGES_DIR=str(tmp / "pages"), QILLQA_TOKEN="t0k-preview", QILLQA_PORT=str(PORT),
+                  QILLQA_VAR_DIR=str(tmp / "var"))  # never touch the real server's pid file
 
 import server  # noqa: E402
 
@@ -73,6 +76,34 @@ try:
     w, _ = png_size(r.content[0].data)
     info = json.loads(r.content[1].text)
     assert w > 390 and info["horizontal_overflow"] is True, (w, info)  # full page = the overflow too
+
+    # Pages taller than the cap come back cut AT the cap (not at the 900 px viewport).
+    server.write_page("tall", '<!doctype html><title>Tall</title><div style="height:9000px">t</div>', "html", create=True)
+    r = asyncio.run(server.preview_page("tall"))
+    assert png_size(r.content[0].data)[1] == server.MAX_PREVIEW_HEIGHT and json.loads(r.content[1].text)["cut_at"]
+
+    # Page JS run by preview_page cannot reach other local services (only its own origin and the CDNs).
+    hits = []
+
+    class Spy(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(self.path)
+            self.send_response(204)
+            self.end_headers()
+        do_GET = do_POST
+
+        def log_message(self, *a):
+            pass
+
+    spy = HTTPServer(("127.0.0.1", 0), Spy)
+    threading.Thread(target=spy.serve_forever, daemon=True).start()
+    server.write_page("ssrf", f'<!doctype html><title>x</title><img src="http://127.0.0.1:{spy.server_port}/img">'
+                              f'<script>fetch("http://127.0.0.1:{spy.server_port}/send",'
+                              '{method:"POST",mode:"no-cors",body:"hi"})</script>', "html", create=True)
+    r = asyncio.run(server.preview_page("ssrf"))
+    time.sleep(0.5)
+    spy.shutdown()
+    assert not r.isError and hits == [], hits
     # The MCP App, inside a mock host that speaks the ext-apps protocol.
     from playwright.sync_api import sync_playwright
 
@@ -91,7 +122,7 @@ try:
         app.contentWindow.postMessage({jsonrpc: "2.0", id: m.id, result: {}}, "*"); }
     });
     app.srcdoc = __UI__;
-    </script>""".replace("__UI__", json.dumps(html.content).replace("</", "<\\/")).replace("__RESULT__", json.dumps(result))
+    </script>""".replace("__UI__", json.dumps(html.content).replace("<", "\\u003c")).replace("__RESULT__", json.dumps(result))
     with sync_playwright() as p:
         kw = {"executable_path": server.CHROME} if os.path.exists(server.CHROME) else {}
         b = p.chromium.launch(args=["--no-sandbox"], **kw)
@@ -121,46 +152,67 @@ try:
                               '<script src="app.js"></script>', "html", create=False)
     shown = asyncio.run(server.show_page("wide"))
     s = shown.structuredContent
-    assert not shown.isError and "html" not in shown.content[0].text, shown.content  # page HTML stays out of the model
-    assert "js ran" in s["html"] and 'src="data:image/png;base64,' in s["html"], s["html"][:300]
+    page_html = shown.meta["qillqa/html"]
+    assert not shown.isError and "html" not in s and "<p" not in shown.content[0].text, shown  # HTML only in _meta
+    assert "insertAdjacentHTML" in page_html and 'src="data:image/png;base64,' in page_html, page_html[:300]
     same = asyncio.run(server.page_snapshot("wide", s["version"])).structuredContent
     assert same == {"changed": False, "version": s["version"]}, same
 
     csp = ('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'self\' '
            '\'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; media-src \'self\' data:; '
-           'connect-src \'none\'">')
+           'connect-src \'none\'">')  # the host's default CSP for a View (spec)
     live_doc = live.content.replace("<head>", "<head>" + csp, 1)
-    host = """<iframe id="app" style="width:700px;height:500px"></iframe><script>
-    const app = document.getElementById("app");
-    const reply = (id, result) => app.contentWindow.postMessage({jsonrpc: "2.0", id, result}, "*");
-    addEventListener("message", async e => {
-      if (e.source !== app.contentWindow) return;
-      const m = e.data;
-      if (m.method === "ui/initialize") reply(m.id, {protocolVersion: "2026-01-26", hostCapabilities: {}});
-      if (m.method === "ui/notifications/initialized") app.contentWindow.postMessage({jsonrpc: "2.0",
-        method: "ui/notifications/tool-result", params: __RESULT__}, "*");
-      if (m.method === "tools/call") reply(m.id, await window.snap(m.params.arguments));
-    });
-    app.srcdoc = __UI__;
-    </script>""".replace("__UI__", json.dumps(live_doc).replace("</", "<\\/")).replace(
-        "__RESULT__", json.dumps(shown.model_dump(by_alias=True, exclude_none=True)).replace("</", "<\\/"))
+
+    def live_host(first) -> str:
+        return """<iframe id="app" style="width:700px;height:500px"></iframe><script>
+        window.got = [];
+        const app = document.getElementById("app");
+        const reply = (id, result) => app.contentWindow.postMessage({jsonrpc: "2.0", id, result}, "*");
+        addEventListener("message", async e => {
+          if (e.source !== app.contentWindow) return;
+          const m = e.data; window.got.push(m.method || "result");
+          if (m.method === "ui/initialize") reply(m.id, {protocolVersion: "2026-01-26", hostCapabilities: {}});
+          if (m.method === "ui/notifications/initialized") app.contentWindow.postMessage({jsonrpc: "2.0",
+            method: "ui/notifications/tool-result", params: __RESULT__}, "*");
+          if (m.method === "tools/call") reply(m.id, await window.snap(m.params.arguments));
+        });
+        app.srcdoc = __UI__;
+        </script>""".replace("__UI__", json.dumps(live_doc).replace("<", "\\u003c")).replace(
+            "__RESULT__", json.dumps(first.model_dump(by_alias=True, exclude_none=True)).replace("<", "\\u003c"))
+
+    server.write_page("mdx", "# Md\n\n<p id=m>md</p>\n\n<script>document.body.insertAdjacentHTML("
+                             "'beforeend','<p id=bad>ran</p>')</script>\n", "md", create=True)
+    md_first = asyncio.run(server.show_page("mdx"))  # asyncio.run can't run inside playwright's loop
     with sync_playwright() as p:
         kw = {"executable_path": server.CHROME} if os.path.exists(server.CHROME) else {}
         b = p.chromium.launch(args=["--no-sandbox"], **kw)
         pg = b.new_page()
         pg.expose_function("snap", lambda a: server._app_result(server._snapshot, a["path"], a.get("since", ""))
                            .model_dump(by_alias=True, exclude_none=True))  # page_snapshot's sync core
-        pg.set_content(host)
-        view = pg.frame_locator("#app").frame_locator("#view")
+        pg.set_content(live_host(shown))
+        app = pg.frame_locator("#app")
+        view = app.frame_locator("#view")
         assert view.locator("#v").inner_text() == "one"
         assert view.locator("#js").inner_text() == "js ran"  # inlined script ran under the host CSP
         assert view.locator("#dot").evaluate("i => i.naturalWidth") == 1  # inlined image loaded
+        assert "ui/notifications/size-changed" in pg.evaluate("window.got")
         time.sleep(0.05)
         server.write_page("wide", '<!doctype html><title>Wide</title><p id=v>two</p>', "html", create=False)
         view.locator("#v", has_text="two").wait_for(timeout=8000)  # the view reloaded by itself
-        assert "live" in pg.frame_locator("#app").locator("#state").inner_text()
+        assert "live" in app.locator("#state").inner_text()
+        server._delete("wide", True)
+        app.locator("#state", has_text="stopped").wait_for(timeout=8000)  # a deleted page stops the polling
+
+        # md pages keep the web UI's rule: raw <script> in the markdown never runs.
+        pg = b.new_page()
+        pg.set_content(live_host(md_first))
+        frame = pg.frame_locator("#app").locator("#view[srcdoc]")
+        frame.wait_for(state="attached")
+        # No allow-scripts: the browser itself refuses the script (and Playwright can't enter the frame).
+        assert frame.get_attribute("sandbox") == "allow-popups allow-popups-to-escape-sandbox"
+        assert "id=m>md</p>" in frame.get_attribute("srcdoc").replace('"', "")
         b.close()
     print("OK: preview_page renders md and html pages, flags overflow; both MCP Apps work in a mock host,"
-          " and the live view follows edits")
+          " and the live view follows edits, stops on delete, keeps md scripts off; preview blocks local SSRF")
 finally:
     server.stop()

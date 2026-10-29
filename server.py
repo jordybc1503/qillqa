@@ -40,7 +40,7 @@ PORT = int(os.environ.get("QILLQA_PORT", "47391"))
 TOKEN = os.environ.get("QILLQA_TOKEN", "")
 MODEL = os.environ.get("QILLQA_MODEL", "Qwen/Qwen3-Embedding-0.6B")
 PAGES = (BASE / os.path.expanduser(os.environ.get("QILLQA_PAGES_DIR", "pages"))).resolve()
-VAR = BASE / "var"
+VAR = Path(os.path.expanduser(os.environ.get("QILLQA_VAR_DIR", BASE / "var")))
 INDEX_NAMES = ("index.md", "index.html")
 URL = f"http://{HOST}:{PORT}"
 
@@ -205,6 +205,15 @@ def _health() -> bool:
 def start() -> dict:
     if _health():
         return {"running": True, "url": URL}
+    VAR.mkdir(exist_ok=True)
+    with open(VAR / "start.lock", "w") as lock:  # concurrent callers (live view polls) start one server
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _start_locked()
+
+
+def _start_locked() -> dict:
+    if _health():
+        return {"running": True, "url": URL}
     if not TOKEN:
         raise RuntimeError("QILLQA_TOKEN is empty in .env; run setup.sh or set a token")
     VAR.mkdir(exist_ok=True)
@@ -349,6 +358,43 @@ def delete_page(path: str, recursive: bool = False) -> str:
 PREVIEW_UI = "ui://qillqa/preview"
 CHROME = os.path.expanduser(os.environ.get("QILLQA_CHROME", "~/.local/opt/google-chrome/chrome"))
 MAX_PREVIEW_HEIGHT = 8000  # ponytail: very long pages are cut here; scroll offsets if ever needed
+# Hosts a previewed page may load from besides itself: what the live view's CSP
+# declares. Anything else is aborted, so page JS run by preview_page cannot
+# reach other services on this machine (e.g. an unauthenticated local API).
+CDN_HOSTS = ("fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com", "cdn.jsdelivr.net", "unpkg.com")
+
+# Shared by both views: JSON-RPC over postMessage with the host (MCP Apps 2026-01-26).
+_BRIDGE_JS = """
+let seq = 0;
+const pending = {};
+const send = m => parent.postMessage(Object.assign({jsonrpc: "2.0"}, m), "*");
+const request = (method, params) => new Promise((ok, fail) => {
+  const id = ++seq; pending[id] = {ok, fail}; send({id, method, params}); });
+const size = () => {
+  const r = document.body.getBoundingClientRect();
+  send({method: "ui/notifications/size-changed", params: {width: Math.ceil(r.width), height: Math.ceil(r.height)}});
+};
+new ResizeObserver(size).observe(document.body);
+function bridge(onResult, onTeardown) {
+  addEventListener("message", e => {
+    if (e.source !== parent) return;
+    const m = e.data || {};
+    if (m.id != null && !m.method) {  // a response to one of our requests
+      const p = pending[m.id]; delete pending[m.id];
+      if (p) m.error ? p.fail(m.error.message || "error") : p.ok(m.result);
+      return;
+    }
+    if (m.id != null) {  // a request from the host: ping, ui/resource-teardown
+      if (m.method === "ui/resource-teardown" && onTeardown) onTeardown();
+      send({id: m.id, result: {}});
+      return;
+    }
+    if (m.method === "ui/notifications/tool-result") onResult(m.params || {});
+  });
+}
+const init = (name, appCapabilities) => request("ui/initialize", {appInfo: {name, version: "1"},
+  appCapabilities, protocolVersion: "2026-01-26"}).then(() => { send({method: "ui/notifications/initialized"}); size(); });
+"""
 
 PREVIEW_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <style>body{margin:0;font:13px/1.4 system-ui,sans-serif;color:#17201d;background:#fff}
@@ -358,31 +404,19 @@ button{font:inherit;padding:4px 10px;border:1px solid #c9d1cd;border-radius:6px;
 img{display:block;width:100%;height:auto}</style></head><body>
 <div id="bar"><span id="t">qillqa preview</span><button id="open" hidden>Open in qillqa</button></div>
 <img id="img" alt="">
-<script>
+<script>""" + _BRIDGE_JS + """
 const [title, openBtn, shotImg] = ["t", "open", "img"].map(id => document.getElementById(id));
-let seq = 0, url = "";
-const pending = {};
-const send = m => parent.postMessage(Object.assign({jsonrpc: "2.0"}, m), "*");
-const request = (method, params) => new Promise(r => { const id = ++seq; pending[id] = r; send({id, method, params}); });
-const size = () => send({method: "ui/notifications/size-changed",
-  params: {width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight}});
-addEventListener("message", e => {
-  if (e.source !== parent) return;
-  const m = e.data || {};
-  if (m.id && pending[m.id]) { pending[m.id](m.result); delete pending[m.id]; return; }
-  if (m.method !== "ui/notifications/tool-result") return;
-  const p = m.params || {}, s = p.structuredContent || {};
+let url = "";
+bridge(p => {
+  const s = p.structuredContent || {};
   const shot = (p.content || []).find(c => c.type === "image");
   if (shot) shotImg.src = "data:" + shot.mimeType + ";base64," + shot.data;
   title.textContent = s.title || "qillqa preview";
   url = s.url || "";
   openBtn.hidden = !url;
-  size();
 });
-shotImg.onload = size;
 openBtn.onclick = () => request("ui/open-link", {url});
-request("ui/initialize", {appInfo: {name: "qillqa-preview", version: "1"}, appCapabilities: {},
-  protocolVersion: "2026-01-26"}).then(() => send({method: "ui/notifications/initialized"}));
+init("qillqa-preview", {});
 </script></body></html>"""
 
 
@@ -398,25 +432,43 @@ def _signed_page_url(path: str) -> tuple[str, str, str]:
         return r.geturl(), _rel(d), _title(d)
 
 
-async def _screenshot(url: str, width: int) -> tuple[bytes, int, int]:
-    """Full-page PNG at `width` px, plus the page's height and scroll width."""
-    from playwright.async_api import async_playwright  # heavy: only when previewing
+async def _screenshot(url: str, width: int) -> tuple[bytes, int, int, bool]:
+    """Full-page PNG at `width` px, the page's height and scroll width, and
+    whether some resource never finished loading."""
+    try:
+        from playwright.async_api import TimeoutError as PwTimeout, async_playwright  # heavy: only here
+    except ImportError:
+        raise RuntimeError("preview needs playwright: .venv/bin/pip install playwright, then set "
+                           "QILLQA_CHROME to a Chrome binary or run `.venv/bin/playwright install chromium`") from None
+    own = urllib.parse.urlsplit(url).netloc
+
+    async def only_own_and_cdns(route):
+        host = urllib.parse.urlsplit(route.request.url)
+        if host.netloc == own or (host.scheme == "https" and host.hostname in CDN_HOSTS) or host.scheme == "data":
+            await route.continue_()
+        else:
+            await route.abort()
 
     async with async_playwright() as p:
         kw = {"executable_path": CHROME} if os.path.exists(CHROME) else {}
         browser = await p.chromium.launch(args=["--no-sandbox"], **kw)
         try:
             page = await browser.new_page(viewport={"width": width, "height": 900})
-            await page.goto(url, wait_until="load")
+            await page.route("**/*", only_own_and_cdns)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            stalled = False
+            try:
+                await page.wait_for_load_state("load", timeout=5000)
+            except PwTimeout:
+                stalled = True  # screenshot what is there rather than nothing
             await page.wait_for_timeout(400)  # inline chart scripts draw after load
             height, scroll = await page.evaluate(
                 "[document.documentElement.scrollHeight, document.documentElement.scrollWidth]")
-            png = await page.screenshot(full_page=height <= MAX_PREVIEW_HEIGHT,
-                                        clip=None if height <= MAX_PREVIEW_HEIGHT else
-                                        {"x": 0, "y": 0, "width": width, "height": MAX_PREVIEW_HEIGHT})
+            clip = None if height <= MAX_PREVIEW_HEIGHT else {"x": 0, "y": 0, "width": width, "height": MAX_PREVIEW_HEIGHT}
+            png = await page.screenshot(full_page=True, clip=clip)
         finally:
             await browser.close()
-    return png, height, scroll
+    return png, height, scroll, stalled
 
 
 @mcp.tool(meta={"ui": {"resourceUri": PREVIEW_UI}})
@@ -430,13 +482,13 @@ async def preview_page(path: str, width: int = 1100) -> CallToolResult:
         if not 200 <= width <= 2400:
             raise ValueError("width must be between 200 and 2400 px")
         url, rel, title = await asyncio.to_thread(_signed_page_url, path)
-        png, height, scroll = await _screenshot(url, width)
+        png, height, scroll, stalled = await _screenshot(url, width)
     except Exception as e:
-        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": str(e)}))],
-                              isError=True)
+        msg = re.sub(r"/f/[^/\s]+/", "/f/…/", str(e))  # the signed URL never expires: keep it out
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": msg}))], isError=True)
     info = {"path": rel, "title": title, "width": width, "height": height,
             "horizontal_overflow": scroll > width, "cut_at": MAX_PREVIEW_HEIGHT if height > MAX_PREVIEW_HEIGHT else None,
-            "url": f"{URL}/#{rel}"}
+            "load_timed_out": stalled, "url": f"{URL}/#{rel}"}
     return CallToolResult(
         content=[ImageContent(type="image", data=base64.b64encode(png).decode(), mimeType="image/png"),
                  TextContent(type="text", text=json.dumps(info, ensure_ascii=False))],
@@ -454,14 +506,17 @@ def preview_ui() -> str:
 # page's real HTML in a sandboxed frame, refreshed by the app-only tool
 # page_snapshot whenever the page's files change. The HTML is self-contained
 # (scripts, styles and media of the page folder inlined), because the host's
-# CSP only lets the app load what it declares.
+# CSP only lets the app load what it declares. It travels in the result's
+# _meta, which the spec keeps out of the model's context.
 
 LIVE_UI = "ui://qillqa/live"
-LIVE_CSP = {"resourceDomains": ["https://fonts.googleapis.com", "https://fonts.gstatic.com",
-                                "https://cdnjs.cloudflare.com", "https://cdn.jsdelivr.net", "https://unpkg.com"]}
+LIVE_CSP = {"resourceDomains": [f"https://{h}" for h in CDN_HOSTS]}
+HTML_META = "qillqa/html"
+MAX_INLINE_BYTES = 5_000_000  # per file; bigger media keep their (dead) relative src
 _SCRIPT_SRC = re.compile(r'<script\b([^>]*?)\bsrc="([^"#?:]+)"([^>]*)>\s*</script>', re.I)
 _STYLESHEET = re.compile(r'<link\b(?=[^>]*\brel="stylesheet")[^>]*\bhref="([^"#?:]+)"[^>]*>', re.I)
 _MEDIA_SRC = re.compile(r'(<(?:img|source|video|audio)\b[^>]*?\b(?:src|poster)=")([^"#?:]+)(")', re.I)
+_CLOSE_TAG = re.compile(r"</(script|style)", re.I)
 MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
         ".webp": "image/webp", ".svg": "image/svg+xml", ".mp4": "video/mp4", ".webm": "video/webm",
         ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav", ".ogg": "audio/ogg"}
@@ -482,18 +537,25 @@ def _standalone_html(path: str) -> tuple[str, str, str]:
 
     def local(name: str) -> Path | None:
         f = (d / urllib.parse.unquote(name)).resolve()
-        return f if f.is_file() and d in f.parents else None
+        ok = f.is_file() and d in f.parents and not f.name.startswith(".") and f.stat().st_size <= MAX_INLINE_BYTES
+        return f if ok else None
+
+    def text(f: Path) -> str:
+        return _CLOSE_TAG.sub(r"<\\/\1", f.read_text("utf-8", "replace"))
 
     def script(m: re.Match) -> str:
         f = local(m.group(2))
         if not f:
             return m.group(0)
-        code = f.read_text("utf-8", "replace").replace("</script", "<\\/script")
-        return f"<script{m.group(1)}{m.group(3)}>{code}</script>"
+        attrs = m.group(1) + m.group(3)
+        code = text(f)
+        if re.search(r"\b(defer|async)\b", attrs) and "module" not in attrs:  # inline scripts can't defer
+            code = f"document.addEventListener('DOMContentLoaded', () => {{\n{code}\n}});"
+        return f"<script{attrs}>{code}</script>"
 
     def style(m: re.Match) -> str:
         f = local(m.group(1))
-        return f"<style>{f.read_text('utf-8', 'replace')}</style>" if f else m.group(0)
+        return f"<style>{text(f)}</style>" if f else m.group(0)
 
     def media(m: re.Match) -> str:
         f = local(m.group(2))
@@ -507,76 +569,74 @@ def _standalone_html(path: str) -> tuple[str, str, str]:
 
 
 LIVE_HTML = """<!doctype html><html><head><meta charset="utf-8">
-<style>html,body{margin:0;height:100%;font:13px/1.4 system-ui,sans-serif;color:#17201d;background:#fff}
-body{display:flex;flex-direction:column}
+<style>body{margin:0;font:13px/1.4 system-ui,sans-serif;color:#17201d;background:#fff}
 #bar{display:flex;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid #e3e8e5}
 #t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
 #state{color:#5d6a65}
 button{font:inherit;padding:4px 10px;border:1px solid #c9d1cd;border-radius:6px;background:#f6f7f6;cursor:pointer}
-#view{flex:1;width:100%;min-height:640px;border:0}</style></head><body>
+#view{display:block;width:100%;height:640px;border:0}</style></head><body>
 <div id="bar"><span id="t">qillqa</span><span id="state"></span>
 <button id="full">Fullscreen</button><button id="open" hidden>Open in qillqa</button></div>
-<iframe id="view" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe>
-<script>
+<iframe id="view"></iframe>
+<script>""" + _BRIDGE_JS + """
 const [title, state, view, fullBtn, openBtn] = ["t", "state", "view", "full", "open"].map(id => document.getElementById(id));
-let seq = 0, page = null, version = null, url = "", timer = null;
-const pending = {};
-const send = m => parent.postMessage(Object.assign({jsonrpc: "2.0"}, m), "*");
-const request = (method, params) => new Promise((ok, fail) => {
-  const id = ++seq; pending[id] = {ok, fail}; send({id, method, params}); });
-function show(s) {
-  if (!s || !s.html) return;
-  title.textContent = s.title || s.path; version = s.version; view.srcdoc = s.html;
+let page = null, version = null, url = "", timer = null, busy = false;
+// md pages never run scripts in the web UI (CSP sandbox without allow-scripts): keep that here.
+const SANDBOX = {html: "allow-scripts allow-popups allow-popups-to-escape-sandbox",
+                 md: "allow-popups allow-popups-to-escape-sandbox"};
+function show(r) {
+  const s = r.structuredContent || {}, html = (r._meta || {})["qillqa/html"];
+  if (!html) return;
+  view.setAttribute("sandbox", SANDBOX[s.format === "html" ? "html" : "md"]);
+  title.textContent = s.title || s.path; version = s.version; view.srcdoc = html;
   state.textContent = "live · updated " + new Date().toLocaleTimeString();
 }
+function stop(why) { clearInterval(timer); timer = null; state.textContent = why; }
 async function poll() {
-  if (!page || document.hidden) return;
+  if (!page || busy || document.hidden) return;
+  busy = true;
   try {
     const r = await request("tools/call", {name: "page_snapshot", arguments: {path: page, since: version}});
-    const s = r && r.structuredContent;
-    if (s && s.changed) show(s);
+    if (r && r.isError) return stop("stopped: " + ((r.content || [])[0] || {}).text);
+    if (r && (r.structuredContent || {}).changed) show(r);
   } catch (e) { state.textContent = "offline: " + e; }
+  finally { busy = false; }
 }
-addEventListener("message", e => {
-  if (e.source !== parent) return;
-  const m = e.data || {};
-  if (m.id && pending[m.id]) {
-    const p = pending[m.id]; delete pending[m.id];
-    m.error ? p.fail(m.error.message || "error") : p.ok(m.result); return;
-  }
-  if (m.method !== "ui/notifications/tool-result") return;
-  const s = (m.params || {}).structuredContent || {};
-  page = s.path; url = s.url || ""; openBtn.hidden = !url; show(s);
+bridge(p => {
+  const s = p.structuredContent || {};
+  if (p.isError) return stop(((p.content || [])[0] || {}).text || "error");
+  page = s.path; url = s.url || ""; openBtn.hidden = !url; show(p);
   clearInterval(timer); timer = setInterval(poll, 2000);
-});
+}, () => stop("closed"));
 fullBtn.onclick = () => request("ui/request-display-mode", {mode: "fullscreen"});
 openBtn.onclick = () => request("ui/open-link", {url});
-request("ui/initialize", {appInfo: {name: "qillqa-live", version: "1"},
-  appCapabilities: {availableDisplayModes: ["inline", "fullscreen"]}, protocolVersion: "2026-01-26"})
-  .then(() => send({method: "ui/notifications/initialized"}));
+init("qillqa-live", {availableDisplayModes: ["inline", "fullscreen"]});
 </script></body></html>"""
 
 
 def _snapshot(path: str, since: str = "") -> dict:
     d = _safe(path)
-    if not _index(d):
+    idx = _index(d)
+    if not idx:
         raise ValueError(f"no page at {path!r}")
     v = _version(d)
     if since and since == v:
         return {"changed": False, "version": v}
     html, rel, title = _standalone_html(path)
-    return {"changed": True, "version": v, "path": rel, "title": title, "html": html, "url": f"{URL}/#{rel}"}
+    return {"changed": True, "version": v, "path": rel, "title": title,
+            "format": idx.suffix.lstrip("."), "html": html, "url": f"{URL}/#{rel}"}
 
 
 def _app_result(fn, *a) -> CallToolResult:
-    """Text for the model, the page for the app (structuredContent stays out of the model's context)."""
+    """The page HTML goes in _meta, for the app only; the model gets a brief."""
     try:
         s = fn(*a)
     except Exception as e:
-        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": str(e)}))], isError=True)
-    brief = {k: v for k, v in s.items() if k != "html"}
-    return CallToolResult(content=[TextContent(type="text", text=json.dumps(brief, ensure_ascii=False))],
-                          structuredContent=s)
+        msg = re.sub(r"/f/[^/\s]+/", "/f/…/", str(e))
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": msg}))], isError=True)
+    html = s.pop("html", None)
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(s, ensure_ascii=False))],
+                          structuredContent=s, _meta={HTML_META: html} if html is not None else None)
 
 
 @mcp.tool(meta={"ui": {"resourceUri": LIVE_UI}})
