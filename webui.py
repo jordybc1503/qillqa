@@ -799,7 +799,7 @@ INDEX = """
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
 <iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation" title="page"></iframe>
-<p id="empty">Pick a page or search for something.</p></section></main>
+<div id="cards" hidden><div class="cards-head"><h2 id="cards-title"></h2><label>Sort <select id="sort"><option value="date">Last changed</option><option value="name">Name</option></select></label></div><div id="cards-body"></div></div></section></main>
 <style>
 header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--card);
 border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),var(--c1)) 1}
@@ -842,7 +842,18 @@ nav a.in{color:var(--c3)}
 nav a.on{background:color-mix(in srgb,var(--c3) 14%,var(--card));color:color-mix(in srgb,var(--c3) 80%,var(--ink));font-weight:600;
 box-shadow:inset 3px 0 0 var(--c3)}
 section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;width:100%;background:var(--bg)}
-#crumb{padding:6px 16px;color:var(--c1);font-size:.85em;font-weight:600;overflow-wrap:anywhere}#empty{padding:24px 16px;color:var(--mute)}
+#crumb{padding:6px 16px;color:var(--c1);font-size:.85em;font-weight:600;overflow-wrap:anywhere}
+/* root (logo) and folders without a page: one card per project, last changed first */
+#cards{flex:1;overflow:auto;padding:4px 16px 24px}
+.cards-head{display:flex;align-items:center;gap:12px;margin:8px 0 14px}.cards-head h2{margin:0;font-size:1.3em;flex:1}
+.cards-head label{color:var(--mute);font-size:.9em}.cards-head select{font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.card{--c:var(--c1);display:flex;flex-direction:column;gap:6px;padding:14px 16px;border-radius:14px;background:var(--card);border:1px solid var(--line);
+border-top:4px solid var(--c);color:var(--fg);text-decoration:none;box-shadow:0 1px 3px color-mix(in srgb,var(--shadow) 8%,transparent)}
+.card:nth-child(5n+2){--c:var(--c2)}.card:nth-child(5n+3){--c:var(--c3)}.card:nth-child(5n+4){--c:var(--c4)}.card:nth-child(5n+5){--c:var(--c5)}
+.card:hover,.card:focus-visible{border-color:var(--c);outline:0;box-shadow:0 6px 18px color-mix(in srgb,var(--shadow) 14%,transparent)}
+.card b{font-size:1.05em;overflow-wrap:anywhere}.card small{color:var(--mute)}.card .last{color:var(--c);font-size:.9em;overflow-wrap:anywhere}
+.none{color:var(--mute)}
 #results{padding:8px 16px;background:var(--card);border-bottom:1px solid var(--line);max-height:45vh;overflow:auto}
 .hit{display:block;padding:10px 12px;margin:6px 0;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none}
 .hit:hover{border-color:var(--c3);background:color-mix(in srgb,var(--c3) 5%,var(--card))}
@@ -881,7 +892,33 @@ function renderTree(nodes){
   }
   return ul;
 }
-async function loadTree(){$('#tree').replaceChildren(renderTree(await api('/api/tree')));mark()}
+let nodes=[],treeAt=0;
+async function loadTree(){nodes=await api('/api/tree');treeAt=Date.now();$('#tree').replaceChildren(renderTree(nodes));mark()}
+// cards: a subtree's newest change, its page count and the page that changed last
+function stats(n){let s={last:n.mtime,lastNode:n.mtime?n:null,pages:n.page?1:0};
+  for(const c of n.children){const k=stats(c);s.pages+=k.pages;if(k.last>s.last){s.last=k.last;s.lastNode=k.lastNode}}return s}
+const nodeAt=(list,p)=>{for(const n of list){if(n.path===p)return n;if(p.startsWith(n.path+'/')){const f=nodeAt(n.children,p);if(f)return f}}return null};
+const ago=new Intl.RelativeTimeFormat(undefined,{numeric:'auto'});
+function when(t){if(!t)return'never';const d=(t*1000-Date.now())/1000,a=Math.abs(d);
+  const [v,u]=a<3600?[d/60,'minute']:a<86400?[d/3600,'hour']:a<86400*30?[d/86400,'day']:a<86400*365?[d/86400/30,'month']:[d/86400/365,'year'];
+  return ago.format(Math.round(v),u)}
+function card(n){const s=stats(n),a=mk('a',{className:'card',href:'#'+n.path},mk('b',{textContent:n.title}),
+    ...(n.path.toLowerCase()!==n.title.toLowerCase()?[mk('small',{textContent:n.path})]:[]),
+    mk('small',{textContent:'Changed '+when(s.last)+' · '+s.pages+(s.pages===1?' page':' pages'),
+      title:s.last?new Date(s.last*1000).toLocaleString():''}));
+  if(s.lastNode&&s.lastNode!==n)a.append(mk('span',{className:'last',textContent:'Last: '+s.lastNode.title}));
+  if(s.lastNode&&s.lastNode!==n)a.onclick=e=>{if(e.target.classList.contains('last')){e.preventDefault();location.hash=s.lastNode.path}};
+  return a}
+async function cards(p){
+  if(Date.now()-treeAt>5000)await loadTree();  // fresh dates when coming back to the list
+  const list=p?(nodeAt(nodes,p)||{children:[]}).children:nodes,by=$('#sort').value,body=$('#cards-body');
+  $('#cards-title').textContent=p?(nodeAt(nodes,p)||{title:p}).title:'Projects';
+  if(!list.length){body.replaceChildren(mk('p',{className:'none',textContent:p?'Nothing here yet.':'No pages yet.'}));return}
+  const rows=list.map(n=>[n,stats(n).last]);
+  rows.sort(by==='name'?(a,b)=>a[0].title.localeCompare(b[0].title):(a,b)=>b[1]-a[1]);
+  body.replaceChildren(mk('div',{className:'grid'},...rows.map(r=>card(r[0]))))}
+$('#sort').value=load('qillqa.sort','date');
+$('#sort').onchange=()=>{save('qillqa.sort',$('#sort').value);cards(decodeURIComponent(location.hash.slice(1)))};
 function mark(){const p=decodeURIComponent(location.hash.slice(1));
   document.querySelectorAll('nav a').forEach(a=>{a.classList.toggle('on',a.dataset.path===p);
     a.classList.toggle('in',!!p&&p.startsWith(a.dataset.path+'/'))})}  // 'in': holds the open page
@@ -890,11 +927,10 @@ async function show(){
   const p=decodeURIComponent(location.hash.slice(1));mark();
   if(!scope){$('#scopename').textContent=p;$('#scope').hidden=!p}
   $('#crumb').textContent=p.split('/').join(' / ');
-  // a folder with no page of its own: nothing to load (the 404 would be an unthemed white JSON)
+  // the root (logo) and a folder with no page of its own show cards; no iframe (its 404 would be unthemed JSON)
   const sec=!!p&&!!document.querySelector('nav a.sec[data-path="'+CSS.escape(p)+'"]');
-  $('#empty').textContent=sec?'No page here: open one of its subpages.':'Pick a page or search for something.';
-  if(!p||sec){$('#page').hidden=true;$('#empty').hidden=false;$('#page').src='about:blank';return}
-  $('#empty').hidden=true;$('#page').hidden=false;
+  if(!p||sec){$('#page').hidden=true;$('#cards').hidden=false;$('#page').src='about:blank';$('nav').classList.remove('open');return cards(p)}
+  $('#cards').hidden=true;$('#page').hidden=false;
   $('#page').src='/view?path='+encodeURIComponent(p);$('nav').classList.remove('open');
 }
 let t;

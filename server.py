@@ -83,7 +83,9 @@ def _children(d: Path) -> list[Path]:
 
 def tree(path: str = "") -> list[dict]:
     def node(d: Path) -> dict:
-        return {"path": _rel(d), "title": _title(d), "page": _index(d) is not None,
+        idx = _index(d)  # mtime: when its own page last changed (0 = folder without a page)
+        return {"path": _rel(d), "title": _title(d), "page": idx is not None,
+                "mtime": int(idx.stat().st_mtime) if idx else 0,
                 "children": [node(c) for c in _children(d)]}
     root = _safe(path)
     if not root.is_dir():
