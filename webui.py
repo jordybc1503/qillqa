@@ -842,7 +842,8 @@ nav a.in{color:var(--c3)}
 nav a.on{background:color-mix(in srgb,var(--c3) 14%,var(--card));color:color-mix(in srgb,var(--c3) 80%,var(--ink));font-weight:600;
 box-shadow:inset 3px 0 0 var(--c3)}
 section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;width:100%;background:var(--bg)}
-#crumb{padding:6px 16px;color:var(--c1);font-size:.85em;font-weight:600;overflow-wrap:anywhere}
+#crumb{padding:6px 16px;color:var(--mute);font-size:.85em;font-weight:600;overflow-wrap:anywhere}
+#crumb a{color:var(--c1);text-decoration:none;border-radius:4px}#crumb a:hover,#crumb a:focus-visible{color:var(--c3);text-decoration:underline}#crumb span{color:var(--fg)}
 /* root (logo) and folders without a page: one card per project, last changed first */
 #cards{flex:1;overflow:auto;padding:4px 16px 24px}
 .cards-head{display:flex;align-items:center;gap:12px;margin:8px 0 14px}.cards-head h2{margin:0;font-size:1.3em;flex:1}
@@ -922,11 +923,15 @@ $('#sort').onchange=()=>{save('qillqa.sort',$('#sort').value);cards(decodeURICom
 function mark(){const p=decodeURIComponent(location.hash.slice(1));
   document.querySelectorAll('nav a').forEach(a=>{a.classList.toggle('on',a.dataset.path===p);
     a.classList.toggle('in',!!p&&p.startsWith(a.dataset.path+'/'))})}  // 'in': holds the open page
+// breadcrumb: Projects / a / b / page — every parent is a link
+function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'#',textContent:'Projects'})]:[];
+  parts.forEach((s,i)=>out.push(' / ',i<parts.length-1?mk('a',{href:'#'+parts.slice(0,i+1).join('/'),textContent:s}):mk('span',{textContent:s})));
+  $('#crumb').replaceChildren(...out)}
 let scope='';
 async function show(){
   const p=decodeURIComponent(location.hash.slice(1));mark();
   if(!scope){$('#scopename').textContent=p;$('#scope').hidden=!p}
-  $('#crumb').textContent=p.split('/').join(' / ');
+  crumb(p);
   // the root (logo) and a folder with no page of its own show cards; no iframe (its 404 would be unthemed JSON)
   const sec=!!p&&!!document.querySelector('nav a.sec[data-path="'+CSS.escape(p)+'"]');
   if(!p||sec){$('#page').hidden=true;$('#cards').hidden=false;$('#page').src='about:blank';$('nav').classList.remove('open');return cards(p)}

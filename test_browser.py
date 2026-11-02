@@ -88,7 +88,7 @@ try:
         pg.click("#avatar")
         pg.click("#settings label:has(#autohide)")  # off: the header stays, and that is remembered
         pg.mouse.move(600, 500, steps=15)
-        pg.click("#crumb")
+        pg.mouse.click(140, 760)  # outside: empty sidebar
         pg.wait_for_timeout(1500)
         assert pg.locator("header").is_visible(), "header hid with auto-hide off"
         pg.reload()
@@ -156,7 +156,7 @@ try:
         assert pg.locator("#settings [value=night]").is_checked(), "night radio not checked after reload"
         pg.click("#settings label:has([value=light])")
         wait_bg("rgb(255, 255, 255)", "back to white failed")
-        pg.click("#crumb")
+        pg.mouse.click(140, 760)  # outside: empty sidebar
         assert pg.locator("#settings").is_hidden(), "outside click did not close settings"
         pg.click("#avatar")
         pg.focus("#settings a")
@@ -186,6 +186,18 @@ try:
         pg.goto(base + "/#bare")  # folder without a page: its subpages as cards, no iframe (its 404 would be unthemed JSON)
         pg.locator(".card").first.wait_for()
         assert pg.locator("#page").is_hidden() and titles() == ["kid"] and pg.inner_text("#cards-title") == "bare", titles()
+        pg.goto(base + "/#proj")
+        pg.locator("#page").wait_for()
+        # breadcrumb: every parent is a link, the current page is not; "Projects" goes back to the cards
+        pg.goto(base + "/#proj/sub")
+        pg.locator("#crumb a").first.wait_for()
+        assert pg.locator("#crumb").inner_text() == "Projects / proj / sub", pg.locator("#crumb").inner_text()
+        assert pg.locator("#crumb a").all_inner_texts() == ["Projects", "proj"], pg.locator("#crumb a").all_inner_texts()
+        pg.click("#crumb a:text-is('proj')")
+        pg.wait_for_function("document.querySelector('#crumb').innerText === 'Projects / proj'")
+        pg.click("#crumb a:text-is('Projects')")
+        pg.locator(".card").first.wait_for()
+        assert pg.inner_text("#cards-title") == "Projects" and pg.inner_text("#crumb") == "", "Projects did not go back to the cards"
         pg.goto(base + "/#proj")
         pg.locator("#page").wait_for()
         # phone: only the page; the floating ☰ brings back header + pages, picking a page hides them again
