@@ -763,6 +763,7 @@ img,video{max-width:100%;border-radius:10px;box-shadow:0 4px 16px color-mix(in s
 box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) 10%,transparent)}
 .login h1{margin:0;background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));-webkit-background-clip:text;background-clip:text;color:transparent}
 input,button{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
+::placeholder{color:var(--mute);opacity:1}
 button{cursor:pointer;background:linear-gradient(90deg,color-mix(in srgb,var(--c3),#000 var(--dim)),color-mix(in srgb,var(--c1),#000 var(--dim)));color:#fff;border:0}.err{color:var(--c2);margin:0}
 """
 THEMES = ("light", "dark", "night")
@@ -881,8 +882,12 @@ let scope='';
 async function show(){
   const p=decodeURIComponent(location.hash.slice(1));mark();
   if(!scope){$('#scopename').textContent=p;$('#scope').hidden=!p}
-  if(!p){$('#page').hidden=true;$('#empty').hidden=false;$('#crumb').textContent='';return}
-  $('#crumb').textContent=p.split('/').join(' / ');$('#empty').hidden=true;$('#page').hidden=false;
+  $('#crumb').textContent=p.split('/').join(' / ');
+  // a folder with no page of its own: nothing to load (the 404 would be an unthemed white JSON)
+  const sec=!!p&&!!document.querySelector('nav a.sec[data-path="'+CSS.escape(p)+'"]');
+  $('#empty').textContent=sec?'No page here: open one of its subpages.':'Pick a page or search for something.';
+  if(!p||sec){$('#page').hidden=true;$('#empty').hidden=false;$('#page').src='about:blank';return}
+  $('#empty').hidden=true;$('#page').hidden=false;
   $('#page').src='/view?path='+encodeURIComponent(p);$('nav').classList.remove('open');
 }
 let t;
@@ -925,13 +930,14 @@ const settings=on=>{pane.hidden=!on;av.setAttribute('aria-expanded',on)};
 av.onclick=()=>settings(pane.hidden);
 addEventListener('click',e=>{if(!me.contains(e.target))settings(false)});
 addEventListener('blur',()=>settings(false));  // a click into the page iframe
-me.addEventListener('keydown',e=>{if(e.key==='Escape'&&!pane.hidden){settings(false);av.focus()}});
+me.addEventListener('focusout',e=>{if(e.relatedTarget&&!me.contains(e.relatedTarget))settings(false)});
+addEventListener('keydown',e=>{if(e.key==='Escape'&&!pane.hidden){settings(false);if(me.contains(document.activeElement))av.focus()}});
 document.querySelectorAll('[name=theme]').forEach(r=>{
   r.checked=r.value===document.documentElement.dataset.theme;
   r.onchange=()=>{document.cookie='qillqa_theme='+r.value+';path=/;max-age=31536000;samesite=lax';
     document.documentElement.dataset.theme=r.value;
     const p=decodeURIComponent(location.hash.slice(1));
-    if(p)$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()}});
+    if(!$('#page').hidden)$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()}});
 const bar=on=>{document.body.classList.toggle('bar',on);$('#menu').textContent=on?'✕':'☰';settings(false)};
 $('#menu').onclick=()=>bar(!document.body.classList.contains('bar'));
 addEventListener('hashchange',()=>bar(false));  // picked a page: back to reading

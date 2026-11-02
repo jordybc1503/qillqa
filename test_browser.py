@@ -39,6 +39,8 @@ md.write_text(PAGE)
 for sub in ("proj", "proj/sub"):  # a folder with a subpage, for the sidebar tree
     (tmp / sub).mkdir()
     (tmp / sub / "index.md").write_text(f"# {sub}\n")
+(tmp / "bare" / "kid").mkdir(parents=True)  # a folder with no page of its own
+(tmp / "bare" / "kid" / "index.md").write_text("# kid\n")
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -131,6 +133,19 @@ try:
         wait_bg("rgb(255, 255, 255)", "back to white failed")
         pg.click("#crumb")
         assert pg.locator("#settings").is_hidden(), "outside click did not close settings"
+        pg.click("#avatar")
+        pg.focus("#settings a")
+        pg.keyboard.press("Tab")  # focus leaves the popover -> it closes
+        assert pg.locator("#settings").is_hidden() and pg.get_attribute("#avatar", "aria-expanded") == "false", "Tab out did not close"
+        pg.click("#avatar")
+        pg.keyboard.press("/")  # search opens; Escape there closes the popover too
+        pg.keyboard.press("Escape")
+        assert pg.locator("#settings").is_hidden(), "Escape outside the popover did not close it"
+        pg.goto(base + "/#bare")  # folder without a page: no iframe (its 404 would be unthemed JSON)
+        pg.locator('nav a[data-path="bare"]').wait_for()
+        assert pg.locator("#page").is_hidden() and "subpages" in pg.inner_text("#empty"), "folder loaded a 404 into the iframe"
+        pg.goto(base + "/#proj")
+        pg.locator("#page").wait_for()
         # phone: only the page; the floating ☰ brings back header + pages, picking a page hides them again
         pg.set_viewport_size({"width": 390, "height": 800})
         assert pg.locator("header").is_hidden() and pg.locator("aside").is_hidden(), "phone should show only the page"
