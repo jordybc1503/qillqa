@@ -41,6 +41,9 @@ for sub in ("proj", "proj/sub"):  # a folder with a subpage, for the sidebar tre
     (tmp / sub / "index.md").write_text(f"# {sub}\n")
 (tmp / "bare" / "kid").mkdir(parents=True)  # a folder with no page of its own
 (tmp / "bare" / "kid" / "index.md").write_text("# kid\n")
+now = time.time()  # last changed: bare (now) > proj (its subpage, 1 h ago) > plan (10 days ago)
+for f, age in (("plan", 10 * 86400), ("proj", 2 * 86400), ("proj/sub", 3600), ("bare/kid", 0)):
+    os.utime(tmp / f / "index.md", (now - age, now - age))
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -66,7 +69,7 @@ try:
         pg.click("button")
         # header auto-hide (default on): seen at load, gone while reading, back from the strip at the top or '/'
         pg.goto(base + "/#plan")
-        pg.mouse.move(600, 500)
+        pg.mouse.move(600, 500, steps=15)
         assert pg.locator("header").is_visible(), "header should show at load"
         pg.locator("header").wait_for(state="hidden", timeout=5000)
         assert pg.evaluate("document.querySelector('main').offsetHeight") >= 795, "page did not take the height"
@@ -163,9 +166,26 @@ try:
         pg.keyboard.press("/")  # search opens; Escape there closes the popover too
         pg.keyboard.press("Escape")
         assert pg.locator("#settings").is_hidden(), "Escape outside the popover did not close it"
-        pg.goto(base + "/#bare")  # folder without a page: no iframe (its 404 would be unthemed JSON)
-        pg.locator('nav a[data-path="bare"]').wait_for()
-        assert pg.locator("#page").is_hidden() and "subpages" in pg.inner_text("#empty"), "folder loaded a 404 into the iframe"
+        # the logo opens the project cards, last changed first; sort by name is remembered
+        pg.click(".brand")
+        pg.locator(".card").first.wait_for()
+        titles = lambda: pg.locator(".card b").all_inner_texts()  # noqa: E731
+        assert pg.locator("#page").is_hidden() and titles() == ["bare", "proj", "Plan"], titles()
+        proj = pg.locator(".card", has_text="proj").first
+        assert "2 pages" in proj.inner_text() and "Last: proj/sub" in proj.inner_text(), proj.inner_text()
+        pg.select_option("#sort", "name")
+        assert titles() == ["bare", "Plan", "proj"], titles()
+        pg.reload()
+        pg.locator(".card").first.wait_for()
+        assert pg.locator("#sort").input_value() == "name" and titles() == ["bare", "Plan", "proj"], "sort not remembered"
+        pg.select_option("#sort", "date")
+        proj.locator(".last").click()  # the "Last:" line opens that page
+        pg.wait_for_function("location.hash === '#proj/sub'")
+        pg.locator("#page").wait_for()
+        assert pg.locator("#page").is_visible() and pg.locator("#cards").is_hidden(), "card did not open the page"
+        pg.goto(base + "/#bare")  # folder without a page: its subpages as cards, no iframe (its 404 would be unthemed JSON)
+        pg.locator(".card").first.wait_for()
+        assert pg.locator("#page").is_hidden() and titles() == ["kid"] and pg.inner_text("#cards-title") == "bare", titles()
         pg.goto(base + "/#proj")
         pg.locator("#page").wait_for()
         # phone: only the page; the floating ☰ brings back header + pages, picking a page hides them again
