@@ -240,11 +240,11 @@ def health():
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page(error: str = ""):
+def login_page(req: Request, error: str = ""):
     msg = '<p class="err">Wrong token</p>' if error else ""
     return _shell("Sign in", f"""<form method="post" action="/login" class="login">
 <h1>qillqa</h1>{msg}<input type="password" name="token" placeholder="Token" autofocus required>
-<button>Sign in</button></form>""")
+<button>Sign in</button></form>""", _theme(req))
 
 
 @app.post("/login")
@@ -601,14 +601,14 @@ document.addEventListener('pointerup',e=>end(true,e));document.addEventListener(
 
 _CHECK_CSS = """<style>
 button.cb{all:unset;cursor:pointer;font-size:1.3em;line-height:1;padding:2px 4px;border-radius:6px}
-button.cb:hover,button.cb:focus-visible{background:color-mix(in srgb,var(--c3) 15%,#fff);outline:2px solid var(--c3)}
+button.cb:hover,button.cb:focus-visible{background:color-mix(in srgb,var(--c3) 15%,var(--card));outline:2px solid var(--c3)}
 .grip{cursor:grab;touch-action:none;user-select:none;color:var(--mute);padding:2px 6px 2px 0;font-size:1.2em}
 td:has(>.grip){white-space:nowrap}
 tr.dragging td{opacity:.45}tr.drop-before :is(td,th){box-shadow:inset 0 3px 0 var(--c2)}tr.drop-after :is(td,th){box-shadow:inset 0 -3px 0 var(--c2)}
 </style>"""
 
 
-def _render_md(title: str, text: str, cap: str = "", nonce: str = "") -> str:
+def _render_md(title: str, text: str, cap: str = "", nonce: str = "", theme: str = "light") -> str:
     """With a capability and a nonce, boxes markdown put in table rows / list items are live."""
     kinds = _kinds(text) if cap else {}
     if kinds:
@@ -650,7 +650,7 @@ def _render_md(title: str, text: str, cap: str = "", nonce: str = "") -> str:
     body = re.sub(r'<a href="(?!#)', '<a target="_blank" href="', body)
     body = body.replace("<table>", '<div class="tw"><table>').replace("</table>", "</table></div>")
     attr = f' data-cap="{cap}"' if kinds else ""
-    return _shell(title, f'<article{attr}>{body}</article>')
+    return _shell(title, f'<article{attr}>{body}</article>', theme)
 
 
 def _page_link(m: re.Match, body: str) -> str:
@@ -703,9 +703,10 @@ def signed_file(sig: str, rest: str, req: Request):
             body, csp = text, _HTML_SANDBOX
         elif _kinds(text):  # checklist: only our nonce'd script runs, never raw <script> in the md
             nonce, cap = secrets.token_urlsafe(16), _grant(_rel(target), _version(text))
-            body, csp = _render_md(_title(target), text, cap, nonce), f"{_MD_LIVE_SANDBOX}; script-src 'nonce-{nonce}'"
+            body, csp = (_render_md(_title(target), text, cap, nonce, _theme(req)),
+                         f"{_MD_LIVE_SANDBOX}; script-src 'nonce-{nonce}'")
         else:
-            body, csp = _render_md(_title(target), text), _MD_SANDBOX
+            body, csp = _render_md(_title(target), text, theme=_theme(req)), _MD_SANDBOX
         return Response(body, media_type="text/html; charset=utf-8",
                         headers={**_SAFE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": csp})
     if not target.is_file():
@@ -719,43 +720,65 @@ def signed_file(sig: str, rest: str, req: Request):
 
 CSS = """
 :root{--bg:#f4f6fb;--fg:#1d2433;--mute:#5d6680;--line:#e2e6f0;--card:#fff;--acc:#5b3fd0;
---c1:#0f7c8c;--c2:#c2502e;--c3:#6d4bd1;--c4:#c98300;--c5:#2f8f5b;color-scheme:light}
+--c1:#0f7c8c;--c2:#c2502e;--c3:#6d4bd1;--c4:#c98300;--c5:#2f8f5b;--ink:#000;--dim:0%;--side:#fbfcff;--zebra:#f7f8fe;
+--code-bg:#fff0ea;--code-fg:#a8401c;--pre-bg:#f5f7ff;--pre-line:#e3e7fb;--quote-bg:#ecf8f6;--quote-fg:#174a52;
+--shadow:#1d2433;color-scheme:light}
+/* dark: gray-blue surfaces, full-contrast text */
+:root[data-theme=dark]{--bg:#0f141d;--fg:#e4e8f1;--mute:#9aa3b8;--line:#2a3243;--card:#171d29;--acc:#a993ff;
+--c1:#3ec3d3;--c2:#ff8f6b;--c3:#a68fff;--c4:#f0b84e;--c5:#5fcf8e;--ink:#fff;--dim:45%;--side:#131925;--zebra:#1b2230;
+--code-bg:#2a1e1b;--code-fg:#ffad8f;--pre-bg:#121824;--pre-line:#2a3243;--quote-bg:#14262a;--quote-fg:#a7e3e6;
+--shadow:#000;color-scheme:dark}
+/* night: near-black, dimmer warm text, no cold blues (reading in the dark) */
+:root[data-theme=night]{--bg:#0a0908;--fg:#d6c7ae;--mute:#8c7f6c;--line:#2a241d;--card:#13110e;--acc:#e0a35e;
+--c1:#b9a15f;--c2:#d9805f;--c3:#c9955f;--c4:#d7b24f;--c5:#9dac67;--ink:#fff;--dim:55%;--side:#100e0c;--zebra:#18150f;
+--code-bg:#231a12;--code-fg:#e8a77a;--pre-bg:#100e0b;--pre-line:#2a241d;--quote-bg:#1a1710;--quote-fg:#cdbb8e;
+--shadow:#000;color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 system-ui,sans-serif}
 a{color:var(--acc);text-underline-offset:3px}code,pre{font-family:ui-monospace,monospace;font-size:.9em}
 article{max-width:880px;margin:24px auto;padding:36px 44px;background:var(--card);border-radius:18px;
-box-shadow:0 1px 3px #1d243314,0 12px 32px #1d24330d}
+box-shadow:0 1px 3px color-mix(in srgb,var(--shadow) 8%,transparent),0 12px 32px color-mix(in srgb,var(--shadow) 5%,transparent)}
 article h1{font-size:2.3em;line-height:1.15;margin:0 0 .6em;padding-bottom:.35em;
 background:linear-gradient(90deg,var(--c2),var(--c3) 55%,var(--c1));-webkit-background-clip:text;background-clip:text;color:transparent;
 border-bottom:4px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),var(--c1)) 1}
 article h2{--c:var(--c1);margin:1.8em 0 .7em;padding:8px 14px;border-left:6px solid var(--c);border-radius:8px;
-background:color-mix(in srgb,var(--c) 11%,#fff);color:color-mix(in srgb,var(--c) 75%,#000)}
+background:color-mix(in srgb,var(--c) 11%,var(--card));color:color-mix(in srgb,var(--c) 75%,var(--ink))}
 article h2:nth-of-type(5n+2){--c:var(--c2)}article h2:nth-of-type(5n+3){--c:var(--c3)}
 article h2:nth-of-type(5n+4){--c:var(--c4)}article h2:nth-of-type(5n+5){--c:var(--c5)}
-article h3{color:var(--c3);margin:1.6em 0 .5em;padding-bottom:4px;border-bottom:2px dotted color-mix(in srgb,var(--c3) 35%,#fff)}
+article h3{color:var(--c3);margin:1.6em 0 .5em;padding-bottom:4px;border-bottom:2px dotted color-mix(in srgb,var(--c3) 35%,var(--card))}
 article li::marker{color:var(--c2)}
-code{background:#fff0ea;color:#a8401c;padding:1px 6px;border-radius:5px}
-pre{background:#f5f7ff;border:1px solid #e3e7fb;border-left:4px solid var(--c3);padding:14px 16px;overflow:auto;border-radius:10px}
-pre code{background:none;color:#1d2433;padding:0}
-blockquote{margin:1em 0;padding:10px 16px;background:#ecf8f6;border-left:4px solid var(--c1);border-radius:8px;color:#174a52}
+code{background:var(--code-bg);color:var(--code-fg);padding:1px 6px;border-radius:5px}
+pre{background:var(--pre-bg);border:1px solid var(--pre-line);border-left:4px solid var(--c3);padding:14px 16px;overflow:auto;border-radius:10px}
+pre code{background:none;color:var(--fg);padding:0}
+blockquote{margin:1em 0;padding:10px 16px;background:var(--quote-bg);border-left:4px solid var(--c1);border-radius:8px;color:var(--quote-fg)}
 blockquote p{margin:.4em 0}
 table{border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:1em 0}
-th{background:linear-gradient(90deg,var(--c1),var(--c3));color:#fff;text-align:left;font-weight:600}
+th{background:linear-gradient(90deg,color-mix(in srgb,var(--c1),#000 var(--dim)),color-mix(in srgb,var(--c3),#000 var(--dim)));color:#fff;text-align:left;font-weight:600}
 .tw{overflow-x:auto;margin:1em 0}.tw table{margin:0}
 td,th{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}
-tbody tr:nth-child(even) td{background:#f7f8fe}
+tbody tr:nth-child(even) td{background:var(--zebra)}
 hr{border:0;height:3px;background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));border-radius:3px}
-img,video{max-width:100%;border-radius:10px;box-shadow:0 4px 16px #1d24331f}audio{width:100%}
+img,video{max-width:100%;border-radius:10px;box-shadow:0 4px 16px color-mix(in srgb,var(--shadow) 12%,transparent)}audio{width:100%}
 @media (max-width:640px){article{margin:0;padding:22px 16px;border-radius:0;box-shadow:none}}
 .login{max-width:340px;margin:18vh auto;display:grid;gap:12px;padding:28px;background:var(--card);border-radius:16px;
-box-shadow:0 12px 32px #1d24331a}
+box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) 10%,transparent)}
 .login h1{margin:0;background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));-webkit-background-clip:text;background-clip:text;color:transparent}
 input,button{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
-button{cursor:pointer;background:linear-gradient(90deg,var(--c3),var(--c1));color:#fff;border:0}.err{color:var(--c2);margin:0}
+::placeholder{color:var(--mute);opacity:1}
+button{cursor:pointer;background:linear-gradient(90deg,color-mix(in srgb,var(--c3),#000 var(--dim)),color-mix(in srgb,var(--c1),#000 var(--dim)));color:#fff;border:0}.err{color:var(--c2);margin:0}
 """
+THEMES = ("light", "dark", "night")
+THEME_COOKIE = "qillqa_theme"
 
 
-def _shell(title: str, body: str) -> str:
-    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+def _theme(req: Request | None) -> str:
+    """The theme cookie, whitelisted: it goes into an HTML attribute."""
+    t = req.cookies.get(THEME_COOKIE, "") if req else ""
+    return t if t in THEMES else "light"
+
+
+def _shell(title: str, body: str, theme: str = "light") -> str:
+    theme = theme if theme in THEMES else "light"
+    return (f'<!doctype html><html lang="en" data-theme="{theme}"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
             f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body>{body}</body></html>")
 
@@ -765,7 +788,12 @@ INDEX = """
 <button id="find" type="button" title="Search (/)" aria-label="Search">🔍</button>
 <input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
 <label id="scope" hidden title="Search only this folder and its subpages"><input type="checkbox" id="only"> only in <b id="scopename"></b></label>
-<a href="/logout" class="out">sign out</a></header>
+<div id="me" class="out"><button id="avatar" type="button" aria-expanded="false" aria-controls="settings" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7z"/></svg></button>
+<div id="settings" hidden><fieldset><legend>Theme</legend>
+<label><input type="radio" name="theme" value="light"> ☀️ White</label>
+<label><input type="radio" name="theme" value="dark"> 🌙 Dark</label>
+<label><input type="radio" name="theme" value="night"> 🌌 Night</label></fieldset>
+<a href="/logout">Sign out</a></div></div></header>
 <button id="menu" type="button" aria-label="Menu" title="Menu">☰</button>
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
@@ -776,11 +804,23 @@ header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var
 border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),var(--c1)) 1}
 .brand{font-weight:800;font-size:1.15em;text-decoration:none;background:linear-gradient(90deg,var(--c2),var(--c3));
 -webkit-background-clip:text;background-clip:text;color:transparent}
-#q{flex:1;min-width:0;background:var(--bg)}#q:focus{outline:2px solid var(--c3);background:#fff}.out{color:var(--mute);font-size:.9em}
+#q{flex:1;min-width:0;background:var(--bg)}#q:focus{outline:2px solid var(--c3);background:var(--card)}
+#me{position:relative;flex:none}#avatar{display:flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;border-radius:50%}
+#avatar:focus-visible{outline:2px solid var(--c3);outline-offset:2px}
+#settings{position:absolute;right:0;top:calc(100% + 8px);z-index:20;min-width:190px;padding:10px;background:var(--card);color:var(--fg);
+border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px color-mix(in srgb,var(--shadow) 22%,transparent)}
+#settings fieldset{border:0;margin:0;padding:0;display:grid;gap:2px}
+#settings legend{padding:0 8px 4px;font-size:.75em;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
+#settings label{display:flex;gap:10px;align-items:center;padding:6px 8px;border-radius:8px;cursor:pointer}
+#settings label:hover{background:color-mix(in srgb,var(--c3) 10%,var(--card))}
+#settings label:has(:checked){background:color-mix(in srgb,var(--c3) 16%,var(--card));font-weight:600}
+#settings input{margin:0;padding:0;accent-color:var(--c3)}
+#settings a{display:block;margin-top:6px;padding:8px;border-top:1px solid var(--line);color:var(--fg);text-decoration:none}
+#settings a:hover{color:var(--c2)}
 #scope{font-size:.85em;color:var(--mute);white-space:nowrap;max-width:30vw;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
 #scope b{color:var(--c1)}#scope input{accent-color:var(--c3);vertical-align:middle}
 main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 62px)}
-aside{background:#fbfcff;border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
+aside{background:var(--side);border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
 nav ul{list-style:none;margin:0;padding-left:14px}nav>ul{padding-left:0}
 #side,#find{background:none;border:0;color:var(--mute);font-size:1.2em;padding:2px 6px;cursor:pointer}#side:hover,#find:hover{color:var(--c3)}
 #find{margin-left:auto}#q,#find{height:46px}header.searching #find,header:not(.searching) #q,header:not(.searching) #scope{display:none}
@@ -789,16 +829,16 @@ body.noside main{grid-template-columns:1fr}body.noside aside{display:none}
 .fold{background:none;border:0;padding:0;color:var(--mute);cursor:pointer;line-height:1;transition:transform .15s}
 .fold:hover{color:var(--c3)}li.open>.row>.fold{transform:rotate(90deg)}nav li>ul{display:none}nav li.open>ul{display:block}
 nav a{flex:1;min-width:0;display:block;padding:4px 8px;border-radius:6px;color:var(--fg);text-decoration:none;overflow-wrap:anywhere}
-nav a:hover{background:color-mix(in srgb,var(--c3) 8%,#fff)}
+nav a:hover{background:color-mix(in srgb,var(--c3) 8%,var(--card))}
 nav a.sec{color:var(--c1);font-weight:600}
 nav a.in{color:var(--c3)}
-nav a.on{background:color-mix(in srgb,var(--c3) 14%,#fff);color:color-mix(in srgb,var(--c3) 80%,#000);font-weight:600;
+nav a.on{background:color-mix(in srgb,var(--c3) 14%,var(--card));color:color-mix(in srgb,var(--c3) 80%,var(--ink));font-weight:600;
 box-shadow:inset 3px 0 0 var(--c3)}
 section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;width:100%;background:var(--bg)}
 #crumb{padding:6px 16px;color:var(--c1);font-size:.85em;font-weight:600;overflow-wrap:anywhere}#empty{padding:24px 16px;color:var(--mute)}
 #results{padding:8px 16px;background:var(--card);border-bottom:1px solid var(--line);max-height:45vh;overflow:auto}
 .hit{display:block;padding:10px 12px;margin:6px 0;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none}
-.hit:hover{border-color:var(--c3);background:color-mix(in srgb,var(--c3) 5%,#fff)}
+.hit:hover{border-color:var(--c3);background:color-mix(in srgb,var(--c3) 5%,var(--card))}
 .hit b{color:var(--c3)}.hit small{color:var(--c1);display:block}
 @media (max-width:760px){header{flex-wrap:wrap}#q{order:2;flex-basis:100%}.out{margin-left:auto}#scope{order:3;max-width:100%}
 main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
@@ -842,8 +882,12 @@ let scope='';
 async function show(){
   const p=decodeURIComponent(location.hash.slice(1));mark();
   if(!scope){$('#scopename').textContent=p;$('#scope').hidden=!p}
-  if(!p){$('#page').hidden=true;$('#empty').hidden=false;$('#crumb').textContent='';return}
-  $('#crumb').textContent=p.split('/').join(' / ');$('#empty').hidden=true;$('#page').hidden=false;
+  $('#crumb').textContent=p.split('/').join(' / ');
+  // a folder with no page of its own: nothing to load (the 404 would be an unthemed white JSON)
+  const sec=!!p&&!!document.querySelector('nav a.sec[data-path="'+CSS.escape(p)+'"]');
+  $('#empty').textContent=sec?'No page here: open one of its subpages.':'Pick a page or search for something.';
+  if(!p||sec){$('#page').hidden=true;$('#empty').hidden=false;$('#page').src='about:blank';return}
+  $('#empty').hidden=true;$('#page').hidden=false;
   $('#page').src='/view?path='+encodeURIComponent(p);$('nav').classList.remove('open');
 }
 let t;
@@ -879,13 +923,29 @@ addEventListener('message',async e=>{
   if(!r.ok&&r.status!==409)$('#crumb').textContent='⚠ '+((await r.json()).detail||r.status);
   f.src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()+'#qy='+(d.y|0);
 });
-const bar=on=>{document.body.classList.toggle('bar',on);$('#menu').textContent=on?'✕':'☰'};
+// avatar -> settings (theme, sign out). The theme is a cookie: the server renders every page in
+// it, including the sandboxed page iframe, which can't read our storage or hear us.
+const me=$('#me'),pane=$('#settings'),av=$('#avatar');
+const settings=on=>{pane.hidden=!on;av.setAttribute('aria-expanded',on)};
+av.onclick=()=>settings(pane.hidden);
+addEventListener('click',e=>{if(!me.contains(e.target))settings(false)});
+addEventListener('blur',()=>settings(false));  // a click into the page iframe
+me.addEventListener('focusout',e=>{if(e.relatedTarget&&!me.contains(e.relatedTarget))settings(false)});
+addEventListener('keydown',e=>{if(e.key==='Escape'&&!pane.hidden){settings(false);if(me.contains(document.activeElement))av.focus()}});
+document.querySelectorAll('[name=theme]').forEach(r=>{
+  r.checked=r.value===document.documentElement.dataset.theme;
+  r.onchange=()=>{document.cookie='qillqa_theme='+r.value+';path=/;max-age=31536000;samesite=lax';
+    document.documentElement.dataset.theme=r.value;
+    const p=decodeURIComponent(location.hash.slice(1));
+    if(!$('#page').hidden)$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()}});
+const bar=on=>{document.body.classList.toggle('bar',on);$('#menu').textContent=on?'✕':'☰';settings(false)};
 $('#menu').onclick=()=>bar(!document.body.classList.contains('bar'));
 addEventListener('hashchange',()=>bar(false));  // picked a page: back to reading
+$('#tree').addEventListener('click',e=>{if(e.target.closest('a'))bar(false)});  // ...also the one already open
 addEventListener('hashchange',show);loadTree().then(show);
 </script>"""
 
 
 @app.get("/", response_class=HTMLResponse)
-def index():
-    return _shell("qillqa", INDEX)
+def index(req: Request):
+    return _shell("qillqa", INDEX, _theme(req))

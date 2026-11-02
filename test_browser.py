@@ -39,6 +39,8 @@ md.write_text(PAGE)
 for sub in ("proj", "proj/sub"):  # a folder with a subpage, for the sidebar tree
     (tmp / sub).mkdir()
     (tmp / sub / "index.md").write_text(f"# {sub}\n")
+(tmp / "bare" / "kid").mkdir(parents=True)  # a folder with no page of its own
+(tmp / "bare" / "kid" / "index.md").write_text("# kid\n")
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -98,6 +100,52 @@ try:
         assert pg.locator("#q").is_visible(), "/ did not open the box"
         pg.locator("nav a").first.focus()  # focus leaves an empty box -> it folds
         assert pg.locator("#q").is_hidden(), "empty box did not fold on blur"
+        # avatar -> settings: theme applies to the shell AND the sandboxed page, and survives a reload
+        pg.goto(base + "/#proj")
+        art_bg = lambda: pg.frames[1].evaluate("getComputedStyle(document.querySelector('article')).backgroundColor")  # noqa: E731
+
+        def wait_bg(want, what):
+            end = time.time() + 15
+            while time.time() < end:
+                try:
+                    if art_bg() == want:
+                        return
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            raise AssertionError(f"{what}: {art_bg()!r}")
+
+        wait_bg("rgb(255, 255, 255)", "page not white by default")
+        assert pg.locator("#settings").is_hidden(), "settings should start closed"
+        pg.click("#avatar")
+        assert pg.locator("#settings").is_visible() and pg.get_attribute("#avatar", "aria-expanded") == "true", "avatar did not open settings"
+        pg.click("#settings label:has([value=night])")
+        assert pg.evaluate("document.documentElement.dataset.theme") == "night", "shell not in night"
+        wait_bg("rgb(19, 17, 14)", "page iframe did not switch to night")
+        pg.keyboard.press("Escape")
+        assert pg.locator("#settings").is_hidden(), "Esc did not close settings"
+        pg.reload()
+        assert pg.evaluate("document.documentElement.dataset.theme") == "night", "night not remembered"
+        wait_bg("rgb(19, 17, 14)", "page iframe not night after reload")
+        pg.click("#avatar")
+        assert pg.locator("#settings [value=night]").is_checked(), "night radio not checked after reload"
+        pg.click("#settings label:has([value=light])")
+        wait_bg("rgb(255, 255, 255)", "back to white failed")
+        pg.click("#crumb")
+        assert pg.locator("#settings").is_hidden(), "outside click did not close settings"
+        pg.click("#avatar")
+        pg.focus("#settings a")
+        pg.keyboard.press("Tab")  # focus leaves the popover -> it closes
+        assert pg.locator("#settings").is_hidden() and pg.get_attribute("#avatar", "aria-expanded") == "false", "Tab out did not close"
+        pg.click("#avatar")
+        pg.keyboard.press("/")  # search opens; Escape there closes the popover too
+        pg.keyboard.press("Escape")
+        assert pg.locator("#settings").is_hidden(), "Escape outside the popover did not close it"
+        pg.goto(base + "/#bare")  # folder without a page: no iframe (its 404 would be unthemed JSON)
+        pg.locator('nav a[data-path="bare"]').wait_for()
+        assert pg.locator("#page").is_hidden() and "subpages" in pg.inner_text("#empty"), "folder loaded a 404 into the iframe"
+        pg.goto(base + "/#proj")
+        pg.locator("#page").wait_for()
         # phone: only the page; the floating ☰ brings back header + pages, picking a page hides them again
         pg.set_viewport_size({"width": 390, "height": 800})
         assert pg.locator("header").is_hidden() and pg.locator("aside").is_hidden(), "phone should show only the page"
