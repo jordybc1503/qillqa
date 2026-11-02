@@ -785,7 +785,6 @@ def _shell(title: str, body: str, theme: str = "light") -> str:
 
 INDEX = """
 <header><button id="side" type="button" title="Show / hide the sidebar" aria-label="Show / hide the sidebar">☰</button><a href="#" class="brand">qillqa</a>
-<button id="find" type="button" title="Search (/)" aria-label="Search">🔍</button>
 <input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
 <label id="scope" hidden title="Search only this folder and its subpages"><input type="checkbox" id="only"> only in <b id="scopename"></b></label>
 <div id="me" class="out"><button id="avatar" type="button" aria-expanded="false" aria-controls="settings" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7z"/></svg></button>
@@ -793,7 +792,9 @@ INDEX = """
 <label><input type="radio" name="theme" value="light"> ☀️ White</label>
 <label><input type="radio" name="theme" value="dark"> 🌙 Dark</label>
 <label><input type="radio" name="theme" value="night"> 🌌 Night</label></fieldset>
+<fieldset><legend>Header</legend><label><input type="checkbox" id="autohide"> Auto-hide</label></fieldset>
 <a href="/logout">Sign out</a></div></div></header>
+<div id="peek" title="Show the header"></div>
 <button id="menu" type="button" aria-label="Menu" title="Menu">☰</button>
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
@@ -810,6 +811,7 @@ border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),v
 #settings{position:absolute;right:0;top:calc(100% + 8px);z-index:20;min-width:190px;padding:10px;background:var(--card);color:var(--fg);
 border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px color-mix(in srgb,var(--shadow) 22%,transparent)}
 #settings fieldset{border:0;margin:0;padding:0;display:grid;gap:2px}
+#settings fieldset+fieldset{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
 #settings legend{padding:0 8px 4px;font-size:.75em;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
 #settings label{display:flex;gap:10px;align-items:center;padding:6px 8px;border-radius:8px;cursor:pointer}
 #settings label:hover{background:color-mix(in srgb,var(--c3) 10%,var(--card))}
@@ -822,8 +824,13 @@ border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px color-mix(
 main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 62px)}
 aside{background:var(--side);border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
 nav ul{list-style:none;margin:0;padding-left:14px}nav>ul{padding-left:0}
-#side,#find{background:none;border:0;color:var(--mute);font-size:1.2em;padding:2px 6px;cursor:pointer}#side:hover,#find:hover{color:var(--c3)}
-#find{margin-left:auto}#q,#find{height:46px}header.searching #find,header:not(.searching) #q,header:not(.searching) #scope{display:none}
+#side{background:none;border:0;color:var(--mute);font-size:1.2em;padding:2px 6px;cursor:pointer}#side:hover{color:var(--c3)}
+#q{height:46px}header:not(.searching) #scope{display:none}
+/* desktop auto-hide: the header goes away while reading; a thin strip at the top brings it back */
+#peek{display:none}
+@media (min-width:761px){body.autohide.hid header{display:none}body.autohide.hid main{height:100vh}
+body.autohide.hid #peek{display:block;position:fixed;top:0;left:0;right:0;height:8px;z-index:30;cursor:pointer;
+background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));opacity:.45}body.autohide.hid #peek:hover{opacity:1}}
 body.noside main{grid-template-columns:1fr}body.noside aside{display:none}
 .row{display:flex;align-items:center}.fold,.leaf{flex:none;width:20px}
 .fold{background:none;border:0;padding:0;color:var(--mute);cursor:pointer;line-height:1;transition:transform .15s}
@@ -848,7 +855,7 @@ nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
 /* phones: only the page; a small floating ☰ brings back header + pages */
 @media (max-width:760px){#menu{display:flex;align-items:center;justify-content:center;position:fixed;right:12px;bottom:12px;z-index:10;width:44px;height:44px;padding:0;border-radius:50%;font-size:1.2em;color:var(--fg);background:var(--card);border:1px solid var(--line);box-shadow:0 2px 10px #0003;opacity:.85}
 body:not(.bar) header,body:not(.bar) aside,body:not(.bar) #crumb,body:not(.bar) #results{display:none}
-#find{display:none}header:not(.searching) #q{display:block}header:not(.searching) #scope:not([hidden]){display:inline}#toggle{display:none}nav{display:block}aside{max-height:50vh}iframe{height:100vh;height:100dvh}}
+header:not(.searching) #scope:not([hidden]){display:inline}#toggle{display:none}nav{display:block}aside{max-height:50vh}iframe{height:100vh;height:100dvh}}
 </style>
 <script>
 const $ = s => document.querySelector(s);
@@ -891,13 +898,12 @@ async function show(){
   $('#page').src='/view?path='+encodeURIComponent(p);$('nav').classList.remove('open');
 }
 let t;
-// the search box stays folded behind 🔍 until used; empty and unfocused = folded again
+// the search box is always there; 'searching' (box in use) only shows the folder filter
 const head=$('header');
-function openFind(){head.classList.add('searching');$('#q').focus()}
-$('#find').onclick=openFind;
+$('#q').addEventListener('focus',()=>head.classList.add('searching'));
 head.addEventListener('focusout',e=>{if(!head.contains(e.relatedTarget)&&!$('#q').value.trim())head.classList.remove('searching')});
 $('#q').addEventListener('keydown',e=>{if(e.key==='Escape'){$('#q').value='';find();$('#q').blur();head.classList.remove('searching')}});
-addEventListener('keydown',e=>{if(e.key==='/'&&!head.classList.contains('searching')&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();openFind()}});
+addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();reveal();$('#q').focus()}});
 $('#q').addEventListener('input',()=>{clearTimeout(t);t=setTimeout(find,400)});
 async function find(){
   const q=$('#q').value.trim(),box=$('#results');
@@ -926,7 +932,7 @@ addEventListener('message',async e=>{
 // avatar -> settings (theme, sign out). The theme is a cookie: the server renders every page in
 // it, including the sandboxed page iframe, which can't read our storage or hear us.
 const me=$('#me'),pane=$('#settings'),av=$('#avatar');
-const settings=on=>{pane.hidden=!on;av.setAttribute('aria-expanded',on)};
+const settings=on=>{pane.hidden=!on;av.setAttribute('aria-expanded',on);if(!on)hide()};
 av.onclick=()=>settings(pane.hidden);
 addEventListener('click',e=>{if(!me.contains(e.target))settings(false)});
 addEventListener('blur',()=>settings(false));  // a click into the page iframe
@@ -938,6 +944,17 @@ document.querySelectorAll('[name=theme]').forEach(r=>{
     document.documentElement.dataset.theme=r.value;
     const p=decodeURIComponent(location.hash.slice(1));
     if(!$('#page').hidden)$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()}});
+// header auto-hide (desktop, on by default): it stays while the mouse is on it or it is in use
+const auto=$('#autohide');let hideT;
+const busy=()=>head.matches(':hover')||head.contains(document.activeElement)||!!$('#q').value.trim()||!pane.hidden;
+function hide(ms=800){clearTimeout(hideT);hideT=setTimeout(()=>{if(!busy())document.body.classList.add('hid')},ms)}
+function reveal(){clearTimeout(hideT);document.body.classList.remove('hid')}
+auto.checked=load('qillqa.autohide',true);document.body.classList.toggle('autohide',auto.checked);
+auto.onchange=()=>{save('qillqa.autohide',auto.checked);document.body.classList.toggle('autohide',auto.checked)};
+$('#peek').addEventListener('mouseenter',reveal);$('#peek').addEventListener('click',reveal);
+head.addEventListener('mouseleave',()=>hide());
+head.addEventListener('focusout',e=>{if(!head.contains(e.relatedTarget))hide()});
+hide(1500);  // seen at load, then out of the way
 const bar=on=>{document.body.classList.toggle('bar',on);$('#menu').textContent=on?'✕':'☰';settings(false)};
 $('#menu').onclick=()=>bar(!document.body.classList.contains('bar'));
 addEventListener('hashchange',()=>bar(false));  // picked a page: back to reading

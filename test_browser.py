@@ -64,6 +64,33 @@ try:
         pg.goto(base + "/login")
         pg.fill("input[name=token]", "browser-tok")
         pg.click("button")
+        # header auto-hide (default on): seen at load, gone while reading, back from the strip at the top or '/'
+        pg.goto(base + "/#plan")
+        pg.mouse.move(600, 500)
+        assert pg.locator("header").is_visible(), "header should show at load"
+        pg.locator("header").wait_for(state="hidden", timeout=5000)
+        assert pg.evaluate("document.querySelector('main').offsetHeight") >= 795, "page did not take the height"
+        pg.mouse.move(600, 3)
+        pg.locator("header").wait_for(state="visible", timeout=2000)
+        pg.mouse.move(600, 500, steps=15)  # like a real mouse: one synthetic jump into the iframe sends the shell no mouseleave
+        pg.locator("header").wait_for(state="hidden", timeout=5000)
+        pg.keyboard.press("/")
+        assert pg.locator("header").is_visible() and pg.evaluate("document.activeElement.id") == "q", "/ did not bring the search"
+        pg.keyboard.type("battery")
+        pg.wait_for_timeout(1500)
+        assert pg.locator("header").is_visible(), "header hid while the search was in use"
+        pg.keyboard.press("Escape")
+        pg.locator("header").wait_for(state="hidden", timeout=5000)
+        pg.mouse.move(600, 3)
+        pg.click("#avatar")
+        pg.click("#settings label:has(#autohide)")  # off: the header stays, and that is remembered
+        pg.mouse.move(600, 500, steps=15)
+        pg.click("#crumb")
+        pg.wait_for_timeout(1500)
+        assert pg.locator("header").is_visible(), "header hid with auto-hide off"
+        pg.reload()
+        pg.wait_for_timeout(1800)
+        assert pg.locator("header").is_visible(), "auto-hide off not remembered"
         # sidebar: folders start collapsed, the user opens them, the choice survives a reload
         pg.goto(base + "/#plan")
         sub, fold = pg.locator('nav a[data-path="proj/sub"]'), pg.locator('nav a[data-path="proj"]').locator("xpath=../button")
@@ -88,18 +115,13 @@ try:
         pg.set_viewport_size({"width": 390, "height": 800})
         assert pg.evaluate("document.documentElement.scrollWidth") <= 390, "overflow at 390 px"
         pg.set_viewport_size({"width": 1200, "height": 800})
-        # search box: folded behind 🔍 until used; the header keeps its height (main is sized from it)
-        h0 = pg.evaluate("document.querySelector('header').offsetHeight")
-        assert pg.locator("#q").is_hidden() and pg.locator("#find").is_visible(), "search box should start folded"
-        pg.click("#find")
-        assert pg.locator("#q").is_visible() and pg.evaluate("document.activeElement.id") == "q", "🔍 did not open the box"
-        assert pg.evaluate("document.querySelector('header').offsetHeight") == h0, "header height jumps when the box opens"
-        pg.keyboard.press("Escape")
-        assert pg.locator("#q").is_hidden(), "Esc did not fold the box"
+        # search box: always visible; '/' focuses it; the folder filter shows only while it is in use
+        active = lambda: pg.evaluate("document.activeElement.id")  # noqa: E731
+        assert pg.locator("#q").is_visible() and pg.locator("#scope").is_hidden(), "search box should always be there"
         pg.keyboard.press("/")
-        assert pg.locator("#q").is_visible(), "/ did not open the box"
-        pg.locator("nav a").first.focus()  # focus leaves an empty box -> it folds
-        assert pg.locator("#q").is_hidden(), "empty box did not fold on blur"
+        assert active() == "q" and pg.locator("#scope").is_visible(), "/ did not focus the box"
+        pg.keyboard.press("Escape")
+        assert active() != "q" and pg.locator("#q").is_visible() and pg.locator("#scope").is_hidden(), "Esc did not leave the box"
         # avatar -> settings: theme applies to the shell AND the sandboxed page, and survives a reload
         pg.goto(base + "/#proj")
         art_bg = lambda: pg.frames[1].evaluate("getComputedStyle(document.querySelector('article')).backgroundColor")  # noqa: E731
@@ -152,7 +174,7 @@ try:
         assert pg.evaluate("document.querySelector('#page').offsetHeight") >= 790, "page does not fill the phone"
         pg.click("#menu")
         assert pg.locator("header").is_visible() and pg.locator('nav a[data-path="plan"]').is_visible(), "☰ did not open the bar"
-        assert pg.locator("#q").is_visible() and pg.locator("#find").is_hidden(), "phone bar should show the search field at once"
+        assert pg.locator("#q").is_visible(), "phone bar should show the search field at once"
         top = lambda sel: pg.evaluate(f"document.querySelector('{sel}').getBoundingClientRect().top")  # noqa: E731
         assert abs(top(".brand") - top(".out")) < 12 and top("#q") > top(".out"), "brand + sign out on one row, field below"
         assert pg.evaluate("document.querySelector('#q').offsetWidth") > 340, "field does not take the row"
