@@ -161,6 +161,13 @@ assert md.count('<a target="_top" href="/#project%20x">') == 2, md
 assert '<a href="#nope/zz">' in md and '<a href="#../x">' in md, md
 assert "allow-top-navigation-by-user-activation" in page.headers["content-security-policy"]
 assert "allow-top-navigation-by-user-activation" in c.get("/").text  # the shell iframe allows it too
+# theme: a cookie the server renders into every page (shell, login, the page iframe); whitelisted
+signed = c.get("/view?path=project x", follow_redirects=False).headers["location"]
+for val, want in (("dark", "dark"), ("night", "night"), ('x"><script>', "light"), ("", "light")):
+    t = TestClient(webui.app, cookies={webui.COOKIE: webui.SESSION, "qillqa_theme": val})
+    for url in ("/", "/login", signed):
+        assert f'<html lang="en" data-theme="{want}">' in t.get(url).text, (val, url)
+assert 'id="avatar"' in c.get("/").text and 'href="/logout"' in c.get("/").text
 # stable anchors and collapsible blocks with markdown inside
 md = webui._render_md("t", '## Tool {#tool}\n\n<details markdown="1"><summary>raw</summary>\n\n```json\n{"a": 1}\n```\n\n</details>')
 assert '<h2 id="tool">' in md and "<details>" in md and "<pre><code" in md, md
