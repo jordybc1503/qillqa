@@ -175,6 +175,9 @@ assert anon.get(base + "photo.png").headers["content-type"] == "image/png"
 assert anon.get(base + "drawing.svg").headers["content-security-policy"] == "sandbox"
 assert "content-security-policy" not in anon.get(base + "doc.pdf").headers
 assert anon.get(base + "clip.mp4", headers={"Range": "bytes=0-3"}).status_code == 206
+# page JS (opaque origin) can read its own files: WebGL textures, GLTFLoader, fetch
+assert anon.get(base + "clip.mp4", headers={"Origin": "null"}).headers["access-control-allow-origin"] == "*"
+assert "access-control-allow-origin" not in page.headers, "the page itself stays non-CORS"
 sig = base.split("/")[2]
 assert anon.get(f"/f/{'0' * 32}/project%20x/photo.png").status_code == 404, "forged signature"
 assert anon.get(f"/f/{sig}/kitchen/").status_code == 404, "signature of another page"
