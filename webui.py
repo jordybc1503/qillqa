@@ -711,7 +711,11 @@ def signed_file(sig: str, rest: str, req: Request):
                         headers={**_SAFE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": csp})
     if not target.is_file():
         _bad(ValueError("not found"))
-    r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private"})
+    # The page runs at an opaque origin, so its own .glb/.json (fetch) and its images and
+    # videos used as WebGL textures are cross-origin reads. The signed URL is already the
+    # capability (anyone holding it can GET the bytes); CORS only lets the page's JS read them.
+    r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private",
+                                      "Access-Control-Allow-Origin": "*"})
     if r.media_type != "application/pdf":  # Chrome refuses to render PDFs in a sandbox
         r.headers["Content-Security-Policy"] = (_HTML_SANDBOX if r.media_type.startswith("text/html")
                                                  else "sandbox")
