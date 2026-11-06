@@ -161,6 +161,7 @@ assert md.count('<a target="_top" href="/#project%20x">') == 2, md
 assert '<a href="#nope/zz">' in md and '<a href="#../x">' in md, md
 assert "allow-top-navigation-by-user-activation" in page.headers["content-security-policy"]
 assert "allow-top-navigation-by-user-activation" in c.get("/").text  # the shell iframe allows it too
+assert 'allow="fullscreen"' in c.get("/").text  # a page (3D viewer, video) may go fullscreen on a click
 # theme: a cookie the server renders into every page (shell, login, the page iframe); whitelisted
 signed = c.get("/view?path=project x", follow_redirects=False).headers["location"]
 for val, want in (("dark", "dark"), ("night", "night"), ('x"><script>', "light"), ("", "light")):

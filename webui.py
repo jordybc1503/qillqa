@@ -802,7 +802,7 @@ INDEX = """
 <button id="menu" type="button" aria-label="Menu" title="Menu">☰</button>
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
-<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation" title="page"></iframe>
+<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation" allow="fullscreen" title="page"></iframe>
 <div id="cards" hidden><div class="cards-head"><h2 id="cards-title"></h2><label>Sort <select id="sort"><option value="date">Last changed</option><option value="name">Name</option></select></label></div><div id="cards-body"></div></div></section></main>
 <style>
 header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--card);
