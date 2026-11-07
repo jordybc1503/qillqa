@@ -428,8 +428,9 @@ try:
         assert pg.evaluate("[editing,edVer,dirty()]") == ["other", ver, False], "edme's save touched other's editor"
         assert (tmp / "edme" / "index.md").read_text() == "typed meanwhile", "the slow save itself must still land"
         # Codex r2: a slow save of one page never blocks saving the page opened after it
-        pg.evaluate("""()=>{let n=0;const f=window.fetch;window.fetch=(u,o)=>o&&o.method==='POST'&&n++===0?
-          new Promise(r=>setTimeout(()=>r(f(u,o)),1500)):f(u,o)}""")
+        # the first POST is held until the second save is done: deterministic, no timing
+        pg.evaluate("""()=>{let n=0;const f=window.fetch,gate=new Promise(r=>window.__go=r);
+          window.fetch=(u,o)=>o&&o.method==='POST'&&n++===0?gate.then(()=>f(u,o)):f(u,o)}""")
         pg.fill("#ed-text", "# Other\n\nedited\n")
         pg.evaluate("void saveEdit()")  # other: slow
         pg.evaluate("closeEdit(true);location.hash='edme'")
@@ -440,7 +441,11 @@ try:
         pg.evaluate("void saveEdit()")  # must not be swallowed by other's pending save
         pg.locator("#ed-msg", has_text="Saved").wait_for(timeout=5000)
         assert (tmp / "edme" / "index.md").read_text() == "edme again"
-        pg.wait_for_timeout(1700)
+        pg.evaluate("window.__go()")  # now let other's save through
+        for _ in range(50):
+            if (tmp / "other" / "index.md").read_text() == "# Other\n\nedited\n":
+                break
+            pg.wait_for_timeout(100)
         assert (tmp / "other" / "index.md").read_text() == "# Other\n\nedited\n"
         b.close()
 finally:  # the whole group: an edit reindexes, which spawns the embedder child

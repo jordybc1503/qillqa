@@ -552,6 +552,13 @@ src = c.get("/api/source?path=project x/sub").json()
 assert src["readonly"] == "mixed line endings", src
 assert c.post("/api/source", json={"path": "project x/sub", "content": src["content"], "version": src["version"]}).status_code == 422
 assert crlf.read_bytes() == b"# Sub\r\nbody\n"
+for lone in (b"a\rb\n", b"a\r\nb\r"):  # Codex r3: a lone CR is read only too
+    crlf.write_bytes(lone)
+    src = c.get("/api/source?path=project x/sub").json()
+    assert src["readonly"] == "lone carriage returns", (lone, src)
+    assert c.post("/api/source", json={"path": "project x/sub", "content": src["content"],
+                                       "version": src["version"]}).status_code == 422
+    assert crlf.read_bytes() == lone
 crlf.write_bytes(b"# Sub\n\xff\xfe broken\n")
 src = c.get("/api/source?path=project x/sub").json()
 assert src["readonly"] == "not valid UTF-8", src

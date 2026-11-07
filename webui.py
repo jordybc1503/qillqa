@@ -361,6 +361,8 @@ def _source_text(idx: Path) -> tuple[str, str]:
     except UnicodeDecodeError:
         return raw.decode("utf-8", "replace"), "not valid UTF-8"
     crlf = text.count("\r\n")
+    if crlf != text.count("\r"):  # a lone CR: the textarea turns it into LF
+        return text, "lone carriage returns"
     return text, "mixed line endings" if 0 < crlf < text.count("\n") else ""
 
 
