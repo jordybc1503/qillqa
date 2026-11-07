@@ -509,4 +509,31 @@ assert r.headers["content-security-policy"] == "sandbox" and r.headers["x-qillqa
 assert anon.get("/api/export?path=exp").status_code == 401
 assert c.get("/api/export?path=nope").status_code == 404 and c.get("/api/export?path=").status_code == 404
 
+# web editor: raw source + files of the folder (not its subpages'), saved with its version
+(server.PAGES / "project x" / "assets").mkdir()
+(server.PAGES / "project x" / "assets" / "model.glb").write_bytes(b"glTF")
+(server.PAGES / "project x" / ".secret").write_text("x")
+server.write_page("project x/sub", "# Sub", "md", True)
+(server.PAGES / "project x" / "sub" / "own.txt").write_text("sub file")
+assert anon.get("/api/source?path=project x").status_code == 401
+src = c.get("/api/source?path=project x").json()
+names = [f["name"] for f in src["files"]]
+assert names == ["clip.mp4", "doc.pdf", "drawing.svg", "photo.png", "assets/model.glb"], names
+assert src["format"] == "md" and src["content"].startswith("# Project")
+glb = next(f for f in src["files"] if f["name"] == "assets/model.glb")
+assert anon.get(glb["url"]).content == b"glTF", glb  # the listed link opens the file
+assert c.get("/api/source?path=symroot").status_code == 404, "followed a linked index out of the notebook"
+assert c.get("/api/source?path=nope").status_code == 404 and c.get("/api/source?path=").status_code == 404
+save = {"path": "project x", "content": "# Project\n\nedited on the web", "version": src["version"]}
+assert anon.post("/api/source", json=save).status_code == 401
+assert c.post("/api/source", data="x", headers={"content-type": "text/plain"}).status_code == 415
+assert c.post("/api/source", json={**save, "version": "stale"}).status_code == 409
+assert server.read_page("project x")["content"].startswith("# Project\n\n![photo]"), "a stale save wrote"
+r = c.post("/api/source", json=save)
+assert r.status_code == 200 and r.json()["version"] != src["version"], r.text
+assert server.read_page("project x")["content"] == save["content"]
+assert c.post("/api/source", json=save).status_code == 409, "the old version saved twice"
+assert c.post("/api/source", json={**save, "path": "symroot", "version": ""}).status_code == 404
+assert (tmp / "outside.html").read_text() == "<title>SECRET TITLE</title>"
+
 print("OK: all checks pass")

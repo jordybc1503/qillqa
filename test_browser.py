@@ -374,6 +374,37 @@ try:
         view.locator("#back").click()
         view.locator("h1", has_text="Share").wait_for(timeout=10000)
         assert off.locator("#list a.on").inner_text() == "Share" and not errs, errs
+        # editor: ✎ Edit shows the raw source and the folder's files; save, stale save, unsaved guard
+        pg.set_viewport_size({"width": 1200, "height": 800})
+        (tmp / "edme" / "assets").mkdir(parents=True)
+        (tmp / "edme" / "index.md").write_text("# Edme\n\nfirst text\n")
+        (tmp / "edme" / "notes.txt").write_text("n")
+        (tmp / "edme" / "assets" / "a.json").write_text("{}")
+        pg.goto(base + "/")
+        pg.reload()  # the tree must know the new page
+        pg.goto(base + "/#edme")
+        pg.locator("#crumb a.edl", has_text="Edit").click()
+        pg.locator("#edit").wait_for()
+        assert pg.locator("#page").is_hidden() and pg.input_value("#ed-text") == "# Edme\n\nfirst text\n"
+        assert pg.locator("#ed-list a").all_inner_texts() == ["notes.txt", "assets/a.json"], pg.locator("#ed-list a").all_inner_texts()
+        pg.fill("#ed-text", "# Edme\n\nsaved from the web\n")
+        pg.keyboard.press("Control+s")
+        pg.locator("#ed-msg", has_text="Saved").wait_for(timeout=5000)
+        assert (tmp / "edme" / "index.md").read_text() == "# Edme\n\nsaved from the web\n"
+        (tmp / "edme" / "index.md").write_text("# Edme\n\nchanged by the MCP\n")
+        pg.fill("#ed-text", "# Edme\n\nmine\n")
+        pg.click("#ed-save")
+        pg.locator("#ed-msg", has_text="changed since").wait_for(timeout=5000)
+        assert (tmp / "edme" / "index.md").read_text() == "# Edme\n\nchanged by the MCP\n", "stale save overwrote"
+        pg.once("dialog", lambda d: d.dismiss())  # unsaved text: leaving asks, and 'cancel' keeps the editor
+        pg.evaluate("location.hash='plan'")
+        pg.wait_for_timeout(500)
+        assert pg.evaluate("location.hash") == "#edme" and pg.locator("#edit").is_visible(), "unsaved text lost"
+        pg.fill("#ed-text", "# Edme\n\nchanged by the MCP\n")  # back to what is on disk -> not dirty... but version is old
+        pg.once("dialog", lambda d: d.accept())
+        pg.locator("#crumb a.edl", has_text="View").click()
+        pg.frame_locator("#page").locator("text=changed by the MCP").wait_for(timeout=5000)
+        assert pg.locator("#edit").is_hidden() and pg.locator("#page").is_visible()
         b.close()
 finally:  # the whole group: an edit reindexes, which spawns the embedder child
     os.killpg(srv.pid, signal.SIGTERM)
