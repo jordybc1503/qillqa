@@ -352,13 +352,16 @@ def _folder_files(d: Path) -> list[dict]:
 MAX_SOURCE = 5_000_000  # bytes of the index file
 
 
-def _source_text(idx: Path) -> tuple[str, bool]:
-    """(text, utf8). The version is taken on this text; invalid UTF-8 is shown but never saved."""
+def _source_text(idx: Path) -> tuple[str, str]:
+    """(text, readonly reason). The version is taken on this text. A file the editor can't write
+    back byte for byte (invalid UTF-8, mixed line endings) is shown but never saved."""
     raw = idx.read_bytes()
     try:
-        return raw.decode("utf-8"), True
+        text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return raw.decode("utf-8", "replace"), False
+        return raw.decode("utf-8", "replace"), "not valid UTF-8"
+    crlf = text.count("\r\n")
+    return text, "mixed line endings" if 0 < crlf < text.count("\n") else ""
 
 
 @app.get("/api/source")
@@ -366,12 +369,12 @@ def api_source(path: str = ""):
     """The page's index.md/html (line endings as \\n, like a textarea) plus the files in its folder."""
     try:
         d, idx = _page_index(path)
-        text, utf8 = _source_text(idx)
+        text, readonly = _source_text(idx)
         files = _folder_files(d)
     except (ValueError, OSError) as e:  # OSError: moved or deleted while we read
         _bad(e)
     return {"path": _rel(d), "format": idx.suffix[1:], "content": text.replace("\r\n", "\n"),
-            "version": _version(text), "utf8": utf8, "files": files}
+            "version": _version(text), "readonly": readonly, "files": files}
 
 
 @app.post("/api/source")
@@ -391,9 +394,9 @@ async def api_source_save(req: Request):
     try:
         with server.page_lock():  # resolve inside the lock: the MCP may move or delete the page
             page, idx = _page_index(str(d.get("path", "")))
-            old, utf8 = _source_text(idx)
-            if not utf8:
-                raise HTTPException(422, "the page is not valid UTF-8; edit it where it lives")
+            old, readonly = _source_text(idx)
+            if readonly:
+                raise HTTPException(422, f"the page has {readonly}; edit it where it lives")
             if _version(old) != d.get("version"):
                 return JSONResponse({"error": "the page changed since you opened it"}, status_code=409)
             if "\r\n" in old:
@@ -1058,7 +1061,7 @@ function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'
   if(n)out.push(mk('span',{className:'exps'},...ed,ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
   $('#crumb').replaceChildren(...out)}
 // editor: raw index.md/html (saved with its version: 409 if the MCP or another tab changed it)
-let editing='',edVer='',edSaved='',edSeq=0,saving=false;  // edSeq: a reply for an older open/save is ignored
+let editing='',edVer='',edSaved='',edSeq=0,saving=-1;  // edSeq: a reply for an older open/save is ignored
 const dirty=()=>!!editing&&$('#ed-text').value!==edSaved;
 const size=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
 const edMsg=(t,bad)=>{$('#ed-msg').textContent=t;$('#ed-msg').classList.toggle('bad',!!bad)};
@@ -1070,8 +1073,8 @@ async function openEdit(p){
   if(my!==edSeq||here()!==p)return;  // clicked again, closed or navigated meanwhile
   if(!r.ok){$('#crumb').textContent='⚠ '+(d.detail||r.status);return}
   const t=$('#ed-text');editing=p;edVer=d.version;t.value=d.content;edSaved=t.value;  // the textarea's own copy
-  t.readOnly=!d.utf8;$('#ed-save').disabled=!d.utf8;
-  $('#ed-name').textContent='index.'+d.format;edMsg(d.utf8?'':'⚠ Not valid UTF-8: read only, edit it where it lives.',!d.utf8);
+  t.readOnly=!!d.readonly;$('#ed-save').disabled=!!d.readonly;
+  $('#ed-name').textContent='index.'+d.format;edMsg(d.readonly?'⚠ Read only ('+d.readonly+'): edit it where it lives.':'',!!d.readonly);
   $('#ed-list').replaceChildren(...(d.files.length?d.files.map(f=>mk('li',{},
     mk('a',{href:f.url,target:'_blank',rel:'noopener',textContent:f.name}),
     mk('small',{textContent:size(f.size)+' · '+when(f.mtime),title:new Date(f.mtime*1000).toLocaleString()}))):
@@ -1084,8 +1087,8 @@ function closeEdit(force){
   if(p&&p===here()){$('#page').hidden=false;$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now();crumb(p)}
   return true}
 async function saveEdit(){
-  const p=editing,text=$('#ed-text').value,my=edSeq;if(!p||saving||$('#ed-save').disabled)return;
-  saving=true;edMsg('Saving…');
+  const p=editing,text=$('#ed-text').value,my=edSeq;if(!p||saving===my||$('#ed-save').disabled)return;
+  saving=my;edMsg('Saving…');  // one save in flight per editor session
   try{
     const r=await fetch('/api/source',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({path:p,content:text,version:edVer})});
@@ -1096,7 +1099,7 @@ async function saveEdit(){
     if(!r.ok){edMsg('⚠ '+(d.detail||r.status),1);return}
     edVer=d.version;edSaved=text;edMsg('Saved '+new Date().toLocaleTimeString())
   }catch(e){if(my===edSeq)edMsg('⚠ Not saved: '+e.message,1)}
-  finally{saving=false}}
+  finally{if(saving===my)saving=-1}}
 $('#ed-save').onclick=saveEdit;$('#ed-cancel').onclick=()=>closeEdit();
 $('#ed-text').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveEdit()}});
 addEventListener('beforeunload',e=>{if(dirty())e.preventDefault()});

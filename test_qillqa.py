@@ -541,15 +541,20 @@ assert (tmp / "outside.html").read_text() == "<title>SECRET TITLE</title>"
 crlf = server.PAGES / "project x" / "sub" / "index.md"
 crlf.write_bytes(b"# Sub\r\n\r\nline one\r\n")
 src = c.get("/api/source?path=project x/sub").json()
-assert src["content"] == "# Sub\n\nline one\n" and src["utf8"], src
+assert src["content"] == "# Sub\n\nline one\n" and src["readonly"] == "", src
 r = c.post("/api/source", json={"path": "project x/sub", "content": "# Sub\n\nline two\n", "version": src["version"]})
 assert r.status_code == 200 and crlf.read_bytes() == b"# Sub\r\n\r\nline two\r\n", crlf.read_bytes()
+assert c.post("/api/source", json={"path": "project x/sub", "content": "# Sub\n\nline three\n",
+                                   "version": r.json()["version"]}).status_code == 200, "its own reply's version"
+assert crlf.read_bytes() == b"# Sub\r\n\r\nline three\r\n"
+crlf.write_bytes(b"# Sub\r\nbody\n")  # mixed: read only, never rewritten
 src = c.get("/api/source?path=project x/sub").json()
-assert c.post("/api/source", json={"path": "project x/sub", "content": src["content"],
-                                   "version": src["version"]}).status_code == 200, "its own reply's version"
+assert src["readonly"] == "mixed line endings", src
+assert c.post("/api/source", json={"path": "project x/sub", "content": src["content"], "version": src["version"]}).status_code == 422
+assert crlf.read_bytes() == b"# Sub\r\nbody\n"
 crlf.write_bytes(b"# Sub\n\xff\xfe broken\n")
 src = c.get("/api/source?path=project x/sub").json()
-assert not src["utf8"]
+assert src["readonly"] == "not valid UTF-8", src
 assert c.post("/api/source", json={"path": "project x/sub", "content": "x", "version": src["version"]}).status_code == 422
 assert crlf.read_bytes() == b"# Sub\n\xff\xfe broken\n", "invalid UTF-8 bytes were rewritten"
 crlf.write_text("# Sub\n")
