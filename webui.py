@@ -349,37 +349,63 @@ def _folder_files(d: Path) -> list[dict]:
     return out
 
 
+MAX_SOURCE = 5_000_000  # bytes of the index file
+
+
+def _source_text(idx: Path) -> tuple[str, bool]:
+    """(text, utf8). The version is taken on this text; invalid UTF-8 is shown but never saved."""
+    raw = idx.read_bytes()
+    try:
+        return raw.decode("utf-8"), True
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", "replace"), False
+
+
 @app.get("/api/source")
 def api_source(path: str = ""):
-    """The page's raw index.md/html plus the files in its folder, for the shell's editor."""
+    """The page's index.md/html (line endings as \\n, like a textarea) plus the files in its folder."""
     try:
         d, idx = _page_index(path)
-    except ValueError as e:
+        text, utf8 = _source_text(idx)
+        files = _folder_files(d)
+    except (ValueError, OSError) as e:  # OSError: moved or deleted while we read
         _bad(e)
-    text = _read_raw(idx)
-    return {"path": _rel(d), "format": idx.suffix[1:], "content": text, "version": _version(text),
-            "files": _folder_files(d)}
+    return {"path": _rel(d), "format": idx.suffix[1:], "content": text.replace("\r\n", "\n"),
+            "version": _version(text), "utf8": utf8, "files": files}
 
 
 @app.post("/api/source")
 async def api_source_save(req: Request):
-    """{path, content, version}: 409 if the page changed since that version (MCP or another tab)."""
+    """{path, content, version}: 409 if the page changed since that version (MCP or another tab).
+    The file keeps its CRLF line endings if it had them."""
     if not req.headers.get("content-type", "").startswith("application/json"):
         raise HTTPException(415, "json only")
+    # ponytail: Content-Length only; a chunked body is buffered before the byte check below
+    if int(req.headers.get("content-length") or 0) > 2 * MAX_SOURCE:
+        raise HTTPException(413, "content must be at most 5 MB")
     d = await req.json()
     content = d.get("content")
-    if not isinstance(content, str) or len(content) > 5_000_000:
-        raise HTTPException(400, "content must be text up to 5 MB")
+    if not isinstance(content, str):
+        raise HTTPException(400, "content must be text")
+    content = content.replace("\r\n", "\n")
     try:
-        page, idx = _page_index(str(d.get("path", "")))
-        with server.page_lock():
-            if _version(_read_raw(idx)) != d.get("version"):
+        with server.page_lock():  # resolve inside the lock: the MCP may move or delete the page
+            page, idx = _page_index(str(d.get("path", "")))
+            old, utf8 = _source_text(idx)
+            if not utf8:
+                raise HTTPException(422, "the page is not valid UTF-8; edit it where it lives")
+            if _version(old) != d.get("version"):
                 return JSONResponse({"error": "the page changed since you opened it"}, status_code=409)
+            if "\r\n" in old:
+                content = content.replace("\n", "\r\n")
+            data = content.encode()
+            if len(data) > MAX_SOURCE:
+                raise HTTPException(413, "content must be at most 5 MB")
             fd, tmp = tempfile.mkstemp(dir=idx.parent, prefix=".edit-", suffix=".tmp")
             with os.fdopen(fd, "wb") as f:
-                f.write(content.encode())
+                f.write(data)
             os.replace(tmp, idx)
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         _bad(e)
     threading.Thread(target=sync, daemon=True).start()
     return {"ok": True, "version": _version(content)}
@@ -1032,37 +1058,45 @@ function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'
   if(n)out.push(mk('span',{className:'exps'},...ed,ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
   $('#crumb').replaceChildren(...out)}
 // editor: raw index.md/html (saved with its version: 409 if the MCP or another tab changed it)
-let editing='',edVer='',edSaved='';
+let editing='',edVer='',edSaved='',edSeq=0,saving=false;  // edSeq: a reply for an older open/save is ignored
 const dirty=()=>!!editing&&$('#ed-text').value!==edSaved;
 const size=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
 const edMsg=(t,bad)=>{$('#ed-msg').textContent=t;$('#ed-msg').classList.toggle('bad',!!bad)};
+const here=()=>decodeURIComponent(location.hash.slice(1));
 async function openEdit(p){
-  const r=await fetch('/api/source?path='+encodeURIComponent(p));
+  const my=++edSeq,r=await fetch('/api/source?path='+encodeURIComponent(p));
   if(r.status===401){location='/login';return}
-  if(!r.ok){$('#crumb').textContent='⚠ '+((await r.json()).detail||r.status);return}
-  const d=await r.json();editing=p;edVer=d.version;edSaved=d.content;
-  $('#ed-name').textContent='index.'+d.format;$('#ed-text').value=d.content;edMsg('');
+  const d=await r.json().catch(()=>({}));
+  if(my!==edSeq||here()!==p)return;  // clicked again, closed or navigated meanwhile
+  if(!r.ok){$('#crumb').textContent='⚠ '+(d.detail||r.status);return}
+  const t=$('#ed-text');editing=p;edVer=d.version;t.value=d.content;edSaved=t.value;  // the textarea's own copy
+  t.readOnly=!d.utf8;$('#ed-save').disabled=!d.utf8;
+  $('#ed-name').textContent='index.'+d.format;edMsg(d.utf8?'':'⚠ Not valid UTF-8: read only, edit it where it lives.',!d.utf8);
   $('#ed-list').replaceChildren(...(d.files.length?d.files.map(f=>mk('li',{},
     mk('a',{href:f.url,target:'_blank',rel:'noopener',textContent:f.name}),
     mk('small',{textContent:size(f.size)+' · '+when(f.mtime),title:new Date(f.mtime*1000).toLocaleString()}))):
     [mk('li',{className:'none',textContent:'No files: only the page itself.'})]));
   $('#ed-files summary').textContent='Files in this page ('+d.files.length+')';
-  $('#page').hidden=true;$('#edit').hidden=false;crumb(p);$('#ed-text').setSelectionRange(0,0);$('#ed-text').focus();$('#ed-text').scrollTop=0}
+  $('#page').hidden=true;$('#edit').hidden=false;crumb(p);t.setSelectionRange(0,0);t.focus();t.scrollTop=0}
 function closeEdit(force){
   if(!force&&dirty()&&!confirm('Discard your unsaved changes?'))return false;
-  const p=editing;editing='';$('#edit').hidden=true;
-  if(p&&p===decodeURIComponent(location.hash.slice(1))){$('#page').hidden=false;
-    $('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now();crumb(p)}
+  const p=editing;editing='';edSeq++;$('#edit').hidden=true;
+  if(p&&p===here()){$('#page').hidden=false;$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now();crumb(p)}
   return true}
 async function saveEdit(){
-  const p=editing,text=$('#ed-text').value;if(!p)return;edMsg('Saving…');
-  const r=await fetch('/api/source',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({path:p,content:text,version:edVer})});
-  if(r.status===401){location='/login';return}
-  const d=await r.json();
-  if(r.status===409){edMsg('⚠ The page changed since you opened it. Copy your text, then Close and Edit again.',1);return}
-  if(!r.ok){edMsg('⚠ '+(d.detail||r.status),1);return}
-  edVer=d.version;edSaved=text;edMsg('Saved '+new Date().toLocaleTimeString())}
+  const p=editing,text=$('#ed-text').value,my=edSeq;if(!p||saving||$('#ed-save').disabled)return;
+  saving=true;edMsg('Saving…');
+  try{
+    const r=await fetch('/api/source',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:p,content:text,version:edVer})});
+    if(r.status===401){location='/login';return}
+    const d=await r.json().catch(()=>({}));
+    if(my!==edSeq||editing!==p)return;  // that editor is gone: its reply must not touch this one
+    if(r.status===409){edMsg('⚠ The page changed since you opened it. Copy your text, then Close and Edit again.',1);return}
+    if(!r.ok){edMsg('⚠ '+(d.detail||r.status),1);return}
+    edVer=d.version;edSaved=text;edMsg('Saved '+new Date().toLocaleTimeString())
+  }catch(e){if(my===edSeq)edMsg('⚠ Not saved: '+e.message,1)}
+  finally{saving=false}}
 $('#ed-save').onclick=saveEdit;$('#ed-cancel').onclick=()=>closeEdit();
 $('#ed-text').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveEdit()}});
 addEventListener('beforeunload',e=>{if(dirty())e.preventDefault()});

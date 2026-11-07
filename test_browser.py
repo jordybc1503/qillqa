@@ -400,11 +400,33 @@ try:
         pg.evaluate("location.hash='plan'")
         pg.wait_for_timeout(500)
         assert pg.evaluate("location.hash") == "#edme" and pg.locator("#edit").is_visible(), "unsaved text lost"
-        pg.fill("#ed-text", "# Edme\n\nchanged by the MCP\n")  # back to what is on disk -> not dirty... but version is old
-        pg.once("dialog", lambda d: d.accept())
+        seen = []
+        pg.once("dialog", lambda d: (seen.append(d.message), d.accept()))
         pg.locator("#crumb a.edl", has_text="View").click()
         pg.frame_locator("#page").locator("text=changed by the MCP").wait_for(timeout=5000)
-        assert pg.locator("#edit").is_hidden() and pg.locator("#page").is_visible()
+        assert seen and pg.locator("#edit").is_hidden() and pg.locator("#page").is_visible(), seen
+        # Codex r1: a late reply of an older open/save never lands on the editor now open
+        pg.evaluate("""()=>{const f=window.fetch;let n=0;window.__slow=u=>String(u).startsWith('/api/source')&&n++===0;
+          window.fetch=(u,o)=>window.__slow(u)?new Promise(r=>setTimeout(()=>r(f(u,o)),1200)):f(u,o)}""")
+        pg.evaluate("openEdit('edme');openEdit('edme')")  # double click: the first reply comes last
+        pg.locator("#edit").wait_for()
+        pg.fill("#ed-text", "typed meanwhile")
+        pg.wait_for_timeout(1600)
+        assert pg.input_value("#ed-text") == "typed meanwhile", "a stale open replaced unsaved text"
+        (tmp / "other" / "index.md").parent.mkdir()
+        (tmp / "other" / "index.md").write_text("# Other\n")
+        pg.evaluate("""()=>{let n=0;const f=window.fetch;window.fetch=(u,o)=>o&&o.method==='POST'&&n++===0?
+          new Promise(r=>setTimeout(()=>r(f(u,o)),1200)):f(u,o)}""")
+        pg.evaluate("void saveEdit()")  # not awaited: slow save of edme, then the user opens another page
+        pg.evaluate("closeEdit(true);location.hash='other'")
+        pg.wait_for_timeout(300)
+        pg.evaluate("openEdit('other')")
+        pg.locator("#ed-name").wait_for()
+        pg.wait_for_function("editing==='other'")
+        ver = pg.evaluate("edVer")
+        pg.wait_for_timeout(1500)
+        assert pg.evaluate("[editing,edVer,dirty()]") == ["other", ver, False], "edme's save touched other's editor"
+        assert (tmp / "edme" / "index.md").read_text() == "typed meanwhile", "the slow save itself must still land"
         b.close()
 finally:  # the whole group: an edit reindexes, which spawns the embedder child
     os.killpg(srv.pid, signal.SIGTERM)

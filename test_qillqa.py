@@ -1,4 +1,5 @@
 """Checks without the real model: .venv/bin/python test_qillqa.py"""
+import contextlib
 import hashlib
 import os
 import re
@@ -535,5 +536,62 @@ assert server.read_page("project x")["content"] == save["content"]
 assert c.post("/api/source", json=save).status_code == 409, "the old version saved twice"
 assert c.post("/api/source", json={**save, "path": "symroot", "version": ""}).status_code == 404
 assert (tmp / "outside.html").read_text() == "<title>SECRET TITLE</title>"
+# Codex r1: CRLF kept (shown as \n like a textarea), invalid UTF-8 never saved, size in bytes,
+# and the page is resolved inside the writer lock
+crlf = server.PAGES / "project x" / "sub" / "index.md"
+crlf.write_bytes(b"# Sub\r\n\r\nline one\r\n")
+src = c.get("/api/source?path=project x/sub").json()
+assert src["content"] == "# Sub\n\nline one\n" and src["utf8"], src
+r = c.post("/api/source", json={"path": "project x/sub", "content": "# Sub\n\nline two\n", "version": src["version"]})
+assert r.status_code == 200 and crlf.read_bytes() == b"# Sub\r\n\r\nline two\r\n", crlf.read_bytes()
+src = c.get("/api/source?path=project x/sub").json()
+assert c.post("/api/source", json={"path": "project x/sub", "content": src["content"],
+                                   "version": src["version"]}).status_code == 200, "its own reply's version"
+crlf.write_bytes(b"# Sub\n\xff\xfe broken\n")
+src = c.get("/api/source?path=project x/sub").json()
+assert not src["utf8"]
+assert c.post("/api/source", json={"path": "project x/sub", "content": "x", "version": src["version"]}).status_code == 422
+assert crlf.read_bytes() == b"# Sub\n\xff\xfe broken\n", "invalid UTF-8 bytes were rewritten"
+crlf.write_text("# Sub\n")
+src = c.get("/api/source?path=project x/sub").json()
+big = "\U0001F600" * 1_300_000  # 1.3 M characters, 5.2 MB of UTF-8
+assert c.post("/api/source", json={"path": "project x/sub", "content": big, "version": src["version"]}).status_code == 413
+assert c.post("/api/source", content=b"{}", headers={"content-type": "application/json",
+                                                     "content-length": str(11_000_000)}).status_code == 413
+assert crlf.read_text() == "# Sub\n"
+real_lock = server.page_lock
+
+
+@contextlib.contextmanager
+def moved_while_waiting():  # the MCP deletes the page while this save waits for the lock
+    with real_lock():
+        crlf.unlink(missing_ok=True)
+        yield
+
+
+server.page_lock = moved_while_waiting
+try:
+    r = c.post("/api/source", json={"path": "project x/sub", "content": "late", "version": src["version"]})
+finally:
+    server.page_lock = real_lock
+assert r.status_code == 404 and not crlf.exists(), (r.status_code, r.text)
+server.write_page("project x/sub", "# Sub\n", "md", True)
+src = c.get("/api/source?path=project x/sub").json()
+
+
+@contextlib.contextmanager
+def format_switched_while_waiting():  # the MCP turns the page into index.html meanwhile
+    with real_lock():
+        crlf.unlink()
+        (crlf.parent / "index.html").write_text("<title>Sub</title>")
+        yield
+
+
+server.page_lock = format_switched_while_waiting
+try:
+    r = c.post("/api/source", json={"path": "project x/sub", "content": "late", "version": src["version"]})
+finally:
+    server.page_lock = real_lock
+assert r.status_code == 409 and (crlf.parent / "index.html").read_text() == "<title>Sub</title>", r.text
 
 print("OK: all checks pass")
