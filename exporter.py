@@ -23,6 +23,7 @@ import json
 import mimetypes
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -41,15 +42,22 @@ for ext, mime in ((".glb", "model/gltf-binary"), (".gltf", "model/gltf+json"), (
 _IMPORT = re.compile(r"""(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2""")
 _MODULE = re.compile(r"""<script\b(?=[^>]*\btype\s*=\s*["']?module)[^>]*>(.*?)</script>""", re.I | re.S)
 _IMPORTMAP = re.compile(r"""<script\b[^>]*\btype\s*=\s*["']?importmap["']?[^>]*>(.*?)</script>""", re.I | re.S)
-_SCRIPT_SRC = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']""", re.I)
+_SCRIPT_SRC = re.compile(r"""(<script\b[^>]*?\bsrc\s*=\s*["']?([^"'\s>]+)[^>]*>)""", re.I)
+
+
+def _inside(p: Path) -> bool:
+    """A symlink must not pull a private file from outside the notebook into a shared export."""
+    r, top = p.resolve(), PAGES.resolve()
+    return r == top or top in r.parents
 
 
 def _pages(d: Path, subpages: bool) -> list[Path]:
     """The page itself (if it has an index) plus, with subpages, every descendant page."""
-    out = [d] if _index(d) else []
+    ok = lambda p: _index(p) and _inside(p) and _inside(_index(p))  # noqa: E731
+    out = [d] if ok(d) else []
     if subpages or not out:  # a folder with no page of its own exports what is under it
         out += sorted(p for p in d.rglob("*") if p.is_dir() and not any(x.startswith(".") for x in p.relative_to(d).parts)
-                      and _index(p))
+                      and ok(p))
     return out
 
 
@@ -59,6 +67,8 @@ def _files(page: Path) -> list[Path]:
     for f in sorted(page.rglob("*")):
         rel = f.relative_to(page)
         if not f.is_file() or any(x.startswith(".") for x in rel.parts) or (len(rel.parts) == 1 and f.name in INDEX_NAMES):
+            continue
+        if not _inside(f):
             continue
         if any(_index(page.joinpath(*rel.parts[:n])) for n in range(1, len(rel.parts))):
             continue  # inside a subpage: it belongs to that page
@@ -80,6 +90,17 @@ def _allowed(url: str) -> bool:
     return u.scheme == "https" and (u.hostname or "") in CDN_HOSTS
 
 
+class _CdnOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Check every redirect target BEFORE following it (checking the final URL is too late)."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _allowed(newurl):
+            raise urllib.error.HTTPError(newurl, code, "redirect outside the CDN allowlist", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_CdnOnlyRedirects)
+
+
 def _fetch(url: str) -> bytes | None:
     """A CDN file, cached under var/export-cache. None if it is not on an allowed public CDN
     (a page must never make the server fetch 127.0.0.1 or the LAN into a shared file) or
@@ -90,9 +111,7 @@ def _fetch(url: str) -> bytes | None:
     if cache.exists():
         return cache.read_bytes()
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "qillqa-export"}), timeout=20) as r:
-            if not _allowed(r.geturl()):  # a redirect left the allowlist
-                return None
+        with _OPENER.open(urllib.request.Request(url, headers={"User-Agent": "qillqa-export"}), timeout=20) as r:
             data = r.read()
     except Exception:
         return None
@@ -119,18 +138,21 @@ def _rewrite_js(src: str, url: str) -> str:
         if spec.startswith(("./", "../", "/")):
             return f"{m.group(1)}{m.group(2)}{urllib.parse.urljoin(url, spec)}{m.group(2)}"
         return m.group(0)
-    return _IMPORT.sub(fix, src).replace("import.meta.url", json.dumps(url))
+    return _META_URL.sub(json.dumps(url), _IMPORT.sub(fix, src))
+
+
+_META_URL = re.compile(r"""(?<!["'`\w.$])import\.meta\.url(?![\w$"'`])""")  # not inside a string
 
 
 class _Bundle:
     def __init__(self):
         self.blobs: list[tuple[str, bytes]] = []  # (mime, bytes); index = id
-        self.ids: dict[str, int] = {}  # sha1 -> id (same bytes stored once)
+        self.ids: dict[str, int] = {}  # sha1+mime -> id (same bytes of the same type stored once)
         self.cdn: dict[str, int] = {}  # absolute CDN URL -> id
         self.missing: list[str] = []
 
     def add(self, data: bytes, mime: str) -> int:
-        h = hashlib.sha1(data).hexdigest()
+        h = hashlib.sha1(data).hexdigest() + mime  # a module blob needs a JS type even if a .txt has its bytes
         if h not in self.ids:
             self.ids[h] = len(self.blobs)
             self.blobs.append((mime, data))
@@ -176,7 +198,8 @@ def build(path: str, subpages: bool = False) -> tuple[str, bytes, dict]:
         base = BASE + urllib.parse.quote(rel) + "/"
         page_html = _page_html(page)
         maps = [json.loads(m) for m in _IMPORTMAP.findall(page_html) if m.strip()]
-        imap = {k: v for m in maps for k, v in m.get("imports", {}).items()}
+        # import-map targets resolve against the document, not against the importing module
+        imap = {k: urllib.parse.urljoin(base, v) for m in maps for k, v in m.get("imports", {}).items()}
         imports: dict[str, str] = {}
         files: dict[str, int] = {}
         seen: set[str] = set()
@@ -192,9 +215,13 @@ def build(path: str, subpages: bool = False) -> tuple[str, bytes, dict]:
             sizes.append((f"{rel}/{f.relative_to(page).as_posix()}", len(data)))
         for body in _MODULE.findall(page_html):
             b._scan(body, base, imap, imports, seen)
-        for src in _SCRIPT_SRC.findall(page_html):  # classic CDN scripts
+        for tag, src in _SCRIPT_SRC.findall(page_html):  # CDN <script src>: modules keep their imports
             url = urllib.parse.urljoin(base, src)
-            if url.startswith(("http://", "https://")) and not url.startswith(BASE) and url not in b.cdn:
+            if not url.startswith(("http://", "https://")) or url.startswith(BASE) or url in b.cdn:
+                continue
+            if re.search(r"""\btype\s*=\s*["']?module""", tag, re.I):
+                b.module(url, imap, imports, seen)
+            else:
                 data = _fetch(url)
                 if data is None:
                     b.missing.append(url)
@@ -220,7 +247,7 @@ def _document(title: str, pages: list[dict], b: _Bundle) -> bytes:
                 "exported": dt.date.today().isoformat()}
     blobs = "".join(f'<script type="text/plain" id="qf{i}">{base64.b64encode(d).decode()}</script>\n'
                     for i, (_, d) in enumerate(b.blobs))
-    data = json.dumps(manifest, ensure_ascii=False).replace("</", "<\\/")
+    data = json.dumps(manifest, ensure_ascii=False).replace("<", "\\u003c")  # no </script, no <!-- states
     return (f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>
 <style>{_CSS}</style></head><body class="{'multi' if len(pages) > 1 else 'single'}">
@@ -259,32 +286,37 @@ for(const[C,p]of[['HTMLImageElement','src'],['HTMLMediaElement','src'],['HTMLSou
   const P=window[C]&&window[C].prototype,d=P&&Object.getOwnPropertyDescriptor(P,p);if(!d||!d.set)continue;
   Object.defineProperty(P,p,{...d,set(v){d.set.call(this,r(v)||v)}})}
 const S=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){return S.call(this,n,/^(src|href|poster|data)$/i.test(n)?(r(v)||v):v)};
-const fix=s=>typeof s!=='string'?s:s.replace(/(\s(?:src|href|poster)\s*=\s*)(["'])([^"']*)\2/gi,(m,a,q,v)=>{const b=r(v);return b?a+q+b+q:m})
+const fix=s=>typeof s!=='string'?s:s.replace(/(\s(?:src|href|poster|data)\s*=\s*)(?:(["'])([^"']*)\2|([^\s"'>]+))/gi,(m,a,q,v,u)=>{
+    const b=r(q?v:u);return b?a+(q||'"')+b+(q||'"'):m})
   .replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=r(v);return b?'url('+q+b+q+')':m});
 for(const p of['innerHTML','outerHTML']){const d=Object.getOwnPropertyDescriptor(Element.prototype,p);
   Object.defineProperty(Element.prototype,p,{...d,set(v){d.set.call(this,fix(v))}})}
 const I=Element.prototype.insertAdjacentHTML;Element.prototype.insertAdjacentHTML=function(w,s){return I.call(this,w,fix(s))};
 document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('a[href]');if(!a)return;
-  const h=a.getAttribute('href')||'',m=h.match(/^\/?#(.+)$/);
-  if(m&&a.target==='_top'){e.preventDefault();parent.postMessage({qx:decodeURIComponent(m[1])},'*')}
+  const h=a.getAttribute('href')||'',m=h.match(/^\/#(.+)$/);  // /#page = another notebook page
+  if(m){e.preventDefault();parent.postMessage({qx:decodeURIComponent(m[1])},'*')}
   else if(h[0]==='#'&&h.length>1){e.preventDefault();const t=document.getElementById(decodeURIComponent(h.slice(1)));t&&t.scrollIntoView()}},true);  // the <base> would send #x elsewhere
 })();`;
 const byPath=Object.fromEntries(D.pages.map(p=>[p.path,p]));
 async function open(path){
   const p=byPath[path]||D.pages[0];$('wait').hidden=false;
   document.querySelectorAll('#list a').forEach(a=>a.classList.toggle('on',a.dataset.p===p.path));
-  const map={},ids=Object.entries(p.files).concat(Object.entries(D.cdn));
-  await Promise.all(ids.map(async([u,id])=>{map[u]=await url(id)}));
+  const map={},ids=Object.entries(p.files).concat(Object.entries(D.cdn)),css=[];
+  const look=(v,b)=>{try{const x=new URL(v,b);x.hash='';x.search='';return map[x.href]}catch(e){}};
+  const cssFix=(t,b)=>t.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const x=look(v,b);return x?'url('+q+x+q+')':m})
+    .replace(/@import\s+(["'])([^"']+)\1/g,(m,q,v)=>{const x=look(v,b);return x?'@import '+q+x+q:m});
+  await Promise.all(ids.map(async([u,id])=>{if(D.mime[id]==='text/css')css.push([u,id]);else map[u]=await url(id)}));
+  for(const[u,id]of css){const k=id+'@'+u;  // a stylesheet's url()/@import resolve against the stylesheet
+    if(!made[k])made[k]=text(id).then(t=>URL.createObjectURL(new Blob([cssFix(t,u)],{type:'text/css'})));map[u]=await made[k]}
   const imports={};for(const[s,u]of Object.entries(p.imports))imports[s]=map[u]||u;
   for(const u in map)if(/\.m?js$/i.test(u)||u in D.cdn)imports[u]=map[u];
   let h=(await text(p.html)).replace(/<script\b[^>]*\btype\s*=\s*["']?importmap["']?[^>]*>[\s\S]*?<\/script>/gi,'');
-  const res=v=>{try{const x=new URL(v,p.base);x.hash='';x.search='';return map[x.href]}catch(e){}};
   const here=location.href.split('#')[0];
-  h=h.replace(/(\s(?:src|href|poster|data)\s*=\s*)(["'])([^"']*)\2/gi,(m,a,q,v)=>{
-       const pl=/href/i.test(a)&&v.match(/^\/?#(.+)$/);  // a link to another notebook page
-       if(pl){const t=decodeURIComponent(pl[1]);return byPath[t]?a+q+here+'#'+encodeURIComponent(t)+q:a.replace(/href/i,'data-href')+q+v+q}
-       const b=res(v);return b?a+q+b+q:m})
-     .replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=res(v);return b?'url('+q+b+q+')':m});
+  h=h.replace(/(\s(?:src|href|poster|data)\s*=\s*)(?:(["'])([^"']*)\2|([^\s"'>]+))/gi,(m,a,q,v,u)=>{
+       const w=q?v:u,Q=q||'"',pl=p.md&&/href/i.test(a)&&w.match(/^\/#(.+)$/);  // md link to another notebook page
+       if(pl){const t=decodeURIComponent(pl[1]);return byPath[t]?a+Q+here+'#'+encodeURIComponent(t)+Q:a.replace(/href/i,'data-href')+Q+w+Q}
+       const b=look(w,p.base);return b?a+Q+b+Q:m})
+     .replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=look(v,p.base);return b?'url('+q+b+q+')':m});
   // markdown pages: no scripts at all (as in qillqa), so no shim; their links were rewritten above
   const head=p.md?'':'<base href="'+p.base+'"><script>window.__qx='+JSON.stringify(map).replace(/</g,'\\u003c')+';'+SHIM+'<\/script>'+
     '<script type="importmap">'+JSON.stringify({imports}).replace(/</g,'\\u003c')+'<\/script>';

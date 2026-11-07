@@ -317,12 +317,21 @@ try:
         # export: a page + subpages as one .html, opened from disk with the network cut off
         (tmp / "share" / "sub").mkdir(parents=True)
         (tmp / "share" / "index.md").write_text("# Share\n\n![dot](dot.png)\n\n[to the subpage](#share/sub)\n\n"
-                                               '<img src="nope.png" onerror="parent.document.title=\'pwned\'">\n')
-        (tmp / "share" / "dot.png").write_bytes(bytes.fromhex(
-            "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
-            "1f15c4890000000d49444154789c63f8cfc0f01f0005000201e5274e"
-            "c70000000049454e44ae426082"))
+                                               '<img src="nope.png" onerror="parent.document.title=\'pwned\'">\n\n'
+                                               "[to sec](#sec)\n\n## Sec {#sec}\n")
+        dot = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                            "1f15c4890000000d49444154789c63f8cfc0f01f0005000201e5274e"
+                            "c70000000049454e44ae426082")
+        (tmp / "share" / "dot.png").write_bytes(dot)
         (tmp / "share" / "sub" / "index.md").write_text("# Sub\n\nhello from the subpage\n")
+        # an html page: unquoted src, a stylesheet with url(), a page link with no target, an anchor
+        (tmp / "share" / "sub" / "app").mkdir()
+        (tmp / "share" / "sub" / "app" / "dot.png").write_bytes(dot)
+        (tmp / "share" / "sub" / "app" / "style.css").write_text("#bg{width:10px;height:10px;background:url(dot.png)}")
+        (tmp / "share" / "sub" / "app" / "index.html").write_text(
+            "<!doctype html><html><head><title>App</title><link rel=stylesheet href=style.css></head><body>"
+            '<img id=u src=dot.png><div id=bg></div><a id=back href="/#share">back</a> <a id=jump href="#far">jump</a>'
+            '<h2 id=far style="margin-top:3000px">Far</h2></body></html>')
         got = pg.request.get(base + "/api/export?path=share&subpages=1")
         assert got.ok and got.headers["content-disposition"].startswith("attachment"), got.headers
         out = tmp / "share.html"
@@ -335,12 +344,23 @@ try:
         view = off.frame_locator("#view")
         view.locator("h1", has_text="Share").wait_for(timeout=10000)
         assert view.locator("img[alt=dot]").evaluate("i=>i.decode().then(()=>i.naturalWidth)") == 1, "embedded image"
-        assert off.locator("#list a").count() == 2, "page list"
+        assert off.locator("#list a").count() == 3, "page list"
         off.wait_for_timeout(500)
         assert off.title() != "pwned", "a script in a markdown page ran in the export"
+        assert view.locator("a", has_text="to sec").get_attribute("href") == "#sec", "heading link kept"
         view.locator("a", has_text="to the subpage").click()
         view.locator("text=hello from the subpage").wait_for(timeout=10000)
         assert off.locator("#list a.on").inner_text() == "Sub" and not errs, errs
+        off.locator("#list a", has_text="App").click()
+        view.locator("#u").wait_for(timeout=10000)
+        assert view.locator("#u").evaluate("i=>i.decode().then(()=>i.naturalWidth)") == 1, "unquoted src"
+        assert "blob:" in view.locator("#bg").evaluate("e=>getComputedStyle(e).backgroundImage"), "css url()"
+        view.locator("#jump").click()
+        off.wait_for_timeout(300)
+        assert off.locator("#list a.on").inner_text() == "App", "an #anchor left the page"
+        view.locator("#back").click()
+        view.locator("h1", has_text="Share").wait_for(timeout=10000)
+        assert off.locator("#list a.on").inner_text() == "Share" and not errs, errs
         b.close()
 finally:  # the whole group: an edit reindexes, which spawns the embedder child
     os.killpg(srv.pid, signal.SIGTERM)

@@ -439,6 +439,47 @@ assert not _calls, f"fetched a forbidden URL: {_calls}"
 _, _, rep = exporter.build("expl")
 assert not _calls and not rep["offline"] and rep["needs_internet_for"] == ["http://127.0.0.1:8080/api/x.js"], rep
 exporter.urllib.request.urlopen = _real_urlopen
+# Codex r1: a redirect is checked before it is followed
+_req = exporter.urllib.request.Request("https://cdn.jsdelivr.net/x.js")
+try:
+    exporter._CdnOnlyRedirects().redirect_request(_req, None, 302, "Found", {}, "http://127.0.0.1:8080/private")
+    raise AssertionError("followed a redirect to 127.0.0.1")
+except exporter.urllib.error.HTTPError:
+    pass
+# Codex r1: a symlink to a file outside the notebook is never embedded
+(tmp / "secret.txt").write_text("private")
+(server.PAGES / "exp" / "leak.txt").symlink_to(tmp / "secret.txt")
+assert all("leak" not in u for u in _unpack(exporter.build("exp")[1])[0]["pages"][0]["files"]), "symlink leaked"
+# Codex r1: a CDN <script type=module src> keeps its relative imports; JS strings stay valid
+_fake = {"https://cdn.jsdelivr.net/m/main.js": b"import {d} from './dep.js';const s=\"import.meta.url\";",
+         "https://cdn.jsdelivr.net/m/dep.js": b"export const d=import.meta.url;"}
+_real_fetch, exporter._fetch = exporter._fetch, lambda u: _fake.get(u)
+(server.PAGES / "cdnmod").mkdir()
+(server.PAGES / "cdnmod" / "index.html").write_text(
+    '<title>t</title><script type=module src="https://cdn.jsdelivr.net/m/main.js"></script>')
+_, doc, rep = exporter.build("cdnmod")
+man, blob = _unpack(doc)
+assert rep["offline"] and set(man["cdn"]) == set(_fake), (rep, man["cdn"])
+m_js = blob(man["cdn"]["https://cdn.jsdelivr.net/m/main.js"]).decode()
+assert "from 'https://cdn.jsdelivr.net/m/dep.js'" in m_js and 's="import.meta.url"' in m_js, m_js
+assert '"https://cdn.jsdelivr.net/m/dep.js"' in blob(man["cdn"]["https://cdn.jsdelivr.net/m/dep.js"]).decode()
+exporter._fetch = _real_fetch
+# Codex r1: a hostile title cannot reach the HTML parser from the manifest; same bytes, other type = other blob
+(server.PAGES / "evil").mkdir()
+(server.PAGES / "evil" / "index.md").write_text("# <!--<script> x\n")
+(server.PAGES / "evil" / "a.txt").write_text("export const v=1;")
+(server.PAGES / "evil" / "b.js").write_text("export const v=1;")
+doc = exporter.build("evil")[1].decode()
+assert "<" not in re.search(r'id="qx">(.*?)</script>', doc, re.S).group(1), "raw < in the manifest"
+evp = _unpack(exporter.build("evil")[1])[0]["pages"][0]["files"]
+assert evp["https://qillqa.invalid/evil/a.txt"] != evp["https://qillqa.invalid/evil/b.js"], "MIME lost by dedup"
+# Codex r1: import-map targets resolve against the page, not against the importing module
+(server.PAGES / "imap" / "js").mkdir(parents=True)
+(server.PAGES / "imap" / "index.html").write_text(
+    '<script type="importmap">{"imports":{"lib":"./lib.js"}}</script><script type=module src="js/main.js"></script>')
+(server.PAGES / "imap" / "lib.js").write_text("export const x=1;")
+(server.PAGES / "imap" / "js" / "main.js").write_text("import {x} from 'lib';")
+assert _unpack(exporter.build("imap")[1])[0]["pages"][0]["imports"]["lib"] == "https://qillqa.invalid/imap/lib.js"
 r = c.get("/api/export?path=exp&subpages=1")
 assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment"), r.headers
 assert r.headers["content-security-policy"] == "sandbox" and r.headers["x-qillqa-offline"] == "yes"
