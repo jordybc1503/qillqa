@@ -323,6 +323,99 @@ async def api_page_edit(req: Request):
     return {"ok": True}
 
 
+def _page_index(path: str) -> tuple[Path, Path]:
+    d = _safe(path)
+    idx = _index(d) if d != PAGES else None
+    if not idx:
+        raise ValueError(f"no page at {path!r}")
+    if idx.is_symlink():  # its target may live outside the notebook
+        raise ValueError(f"{path!r}: the page file is a link, edit it where it lives")
+    return d, idx
+
+
+def _folder_files(d: Path) -> list[dict]:
+    """Every file the page folder holds, down its non-page subfolders (assets/…); subpages are theirs."""
+    base, out = signed_url(_rel(d)), []
+    for root, dirs, files in os.walk(d):
+        r = Path(root)
+        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and not _index(r / x))
+        for f in sorted(files):
+            p = r / f
+            if f.startswith(".") or (r == d and f in server.INDEX_NAMES) or p.is_symlink():
+                continue
+            rel, st = p.relative_to(d).as_posix(), p.stat()
+            out.append({"name": rel, "size": st.st_size, "mtime": st.st_mtime,
+                        "url": base + "/".join(urllib.parse.quote(s) for s in rel.split("/"))})
+    return out
+
+
+MAX_SOURCE = 5_000_000  # bytes of the index file
+
+
+def _source_text(idx: Path) -> tuple[str, str]:
+    """(text, readonly reason). The version is taken on this text. A file the editor can't write
+    back byte for byte (invalid UTF-8, mixed line endings) is shown but never saved."""
+    raw = idx.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", "replace"), "not valid UTF-8"
+    crlf = text.count("\r\n")
+    if crlf != text.count("\r"):  # a lone CR: the textarea turns it into LF
+        return text, "lone carriage returns"
+    return text, "mixed line endings" if 0 < crlf < text.count("\n") else ""
+
+
+@app.get("/api/source")
+def api_source(path: str = ""):
+    """The page's index.md/html (line endings as \\n, like a textarea) plus the files in its folder."""
+    try:
+        d, idx = _page_index(path)
+        text, readonly = _source_text(idx)
+        files = _folder_files(d)
+    except (ValueError, OSError) as e:  # OSError: moved or deleted while we read
+        _bad(e)
+    return {"path": _rel(d), "format": idx.suffix[1:], "content": text.replace("\r\n", "\n"),
+            "version": _version(text), "readonly": readonly, "files": files}
+
+
+@app.post("/api/source")
+async def api_source_save(req: Request):
+    """{path, content, version}: 409 if the page changed since that version (MCP or another tab).
+    The file keeps its CRLF line endings if it had them."""
+    if not req.headers.get("content-type", "").startswith("application/json"):
+        raise HTTPException(415, "json only")
+    # ponytail: Content-Length only; a chunked body is buffered before the byte check below
+    if int(req.headers.get("content-length") or 0) > 2 * MAX_SOURCE:
+        raise HTTPException(413, "content must be at most 5 MB")
+    d = await req.json()
+    content = d.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(400, "content must be text")
+    content = content.replace("\r\n", "\n")
+    try:
+        with server.page_lock():  # resolve inside the lock: the MCP may move or delete the page
+            page, idx = _page_index(str(d.get("path", "")))
+            old, readonly = _source_text(idx)
+            if readonly:
+                raise HTTPException(422, f"the page has {readonly}; edit it where it lives")
+            if _version(old) != d.get("version"):
+                return JSONResponse({"error": "the page changed since you opened it"}, status_code=409)
+            if "\r\n" in old:
+                content = content.replace("\n", "\r\n")
+            data = content.encode()
+            if len(data) > MAX_SOURCE:
+                raise HTTPException(413, "content must be at most 5 MB")
+            fd, tmp = tempfile.mkstemp(dir=idx.parent, prefix=".edit-", suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, idx)
+    except (ValueError, OSError) as e:
+        _bad(e)
+    threading.Thread(target=sync, daemon=True).start()
+    return {"ok": True, "version": _version(content)}
+
+
 @app.get("/api/search")
 def api_search(q: str = "", limit: int = 10, path: str = ""):
     try:
@@ -819,6 +912,10 @@ INDEX = """
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
 <iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation" allow="fullscreen" title="page"></iframe>
+<div id="edit" hidden><div class="ed-bar"><b id="ed-name"></b><small id="ed-msg"></small>
+<button id="ed-cancel" type="button" class="ghost">Close</button><button id="ed-save" type="button">Save</button></div>
+<textarea id="ed-text" spellcheck="false" aria-label="Page source"></textarea>
+<details id="ed-files" open><summary>Files in this page</summary><ul id="ed-list"></ul></details></div>
 <div id="cards" hidden><div class="cards-head"><h2 id="cards-title"></h2><label>Sort <select id="sort"><option value="date">Last changed</option><option value="name">Name</option></select></label></div><div id="cards-body"></div></div></section></main>
 <style>
 header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--card);
@@ -863,7 +960,7 @@ nav a.on{background:color-mix(in srgb,var(--c3) 14%,var(--card));color:color-mix
 box-shadow:inset 3px 0 0 var(--c3)}
 section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;width:100%;background:var(--bg)}
 #crumb{padding:6px 16px;color:var(--mute);font-size:.85em;font-weight:600;overflow-wrap:anywhere}
-#crumb .exps{float:right;display:flex;gap:12px;color:inherit}#crumb a.exp{font-weight:500;white-space:nowrap}
+#crumb .exps{float:right;display:flex;gap:12px;color:inherit}#crumb a.exp,#crumb a.edl{font-weight:500;white-space:nowrap}
 #crumb a{color:var(--c1);text-decoration:none;border-radius:4px}#crumb a:hover,#crumb a:focus-visible{color:var(--c3);text-decoration:underline}#crumb span{color:var(--fg)}
 /* root (logo) and folders without a page: one card per project, last changed first */
 #cards{flex:1;overflow:auto;padding:4px 16px 24px}
@@ -884,6 +981,16 @@ border-top:4px solid var(--c);color:var(--fg);text-decoration:none;box-shadow:0 
 main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
 #side{display:none}#toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
 nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
+/* editor: the page source and the files in its folder */
+#edit{flex:1;display:flex;flex-direction:column;gap:8px;padding:4px 16px 16px;min-height:0}#edit[hidden]{display:none}
+.ed-bar{display:flex;align-items:center;gap:10px}.ed-bar b{overflow-wrap:anywhere}.ed-bar small{flex:1;color:var(--mute)}
+.ed-bar small.bad{color:var(--c2)}.ed-bar button{padding:6px 14px}button.ghost{background:var(--card);color:var(--fg);border:1px solid var(--line)}
+#ed-text{flex:1;min-height:40vh;width:100%;resize:vertical;padding:12px 14px;border:1px solid var(--line);border-radius:10px;
+background:var(--card);color:var(--fg);font:14px/1.55 ui-monospace,monospace;tab-size:2}#ed-text:focus{outline:2px solid var(--c3)}
+#ed-files{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px;max-height:30vh;overflow:auto}
+#ed-files summary{cursor:pointer;font-weight:600;color:var(--c1)}#ed-list{list-style:none;margin:6px 0 0;padding:0}
+#ed-list li{display:flex;gap:12px;padding:4px 0;border-top:1px solid var(--line)}#ed-list a{flex:1;overflow-wrap:anywhere}
+#ed-list small{color:var(--mute);white-space:nowrap}
 #menu{display:none}
 /* phones: only the page; a small floating ☰ brings back header + pages */
 @media (max-width:760px){#menu{display:flex;align-items:center;justify-content:center;position:fixed;right:12px;bottom:12px;z-index:10;width:44px;height:44px;padding:0;border-radius:50%;font-size:1.2em;color:var(--fg);background:var(--card);border:1px solid var(--line);box-shadow:0 2px 10px #0003;opacity:.85}
@@ -951,16 +1058,64 @@ function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'
   const n=p&&nodeAt(nodes,p),ex=(t,sub)=>mk('a',{className:'exp',download:'',textContent:t,
     href:'/api/export?path='+encodeURIComponent(p)+(sub?'&subpages=1':''),title:'Download one .html file that opens on any device, even offline'});
   const below=x=>x.children.some(c=>c.page||below(c));  // a real page below (an assets/ folder is not one)
-  if(n)out.push(mk('span',{className:'exps'},ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
+  const ed=n&&n.page?[mk('a',{className:'edl',href:'#'+p,textContent:editing?'👁 View':'✎ Edit',
+    title:'Edit the page source and see the files in its folder',onclick:e=>{e.preventDefault();editing?closeEdit():openEdit(p)}})]:[];
+  if(n)out.push(mk('span',{className:'exps'},...ed,ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
   $('#crumb').replaceChildren(...out)}
+// editor: raw index.md/html (saved with its version: 409 if the MCP or another tab changed it)
+let editing='',edVer='',edSaved='',edSeq=0,saving=-1;  // edSeq: a reply for an older open/save is ignored
+const dirty=()=>!!editing&&$('#ed-text').value!==edSaved;
+const size=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
+const edMsg=(t,bad)=>{$('#ed-msg').textContent=t;$('#ed-msg').classList.toggle('bad',!!bad)};
+const here=()=>decodeURIComponent(location.hash.slice(1));
+async function openEdit(p){
+  const my=++edSeq,r=await fetch('/api/source?path='+encodeURIComponent(p));
+  if(r.status===401){location='/login';return}
+  const d=await r.json().catch(()=>({}));
+  if(my!==edSeq||here()!==p)return;  // clicked again, closed or navigated meanwhile
+  if(!r.ok){$('#crumb').textContent='⚠ '+(d.detail||r.status);return}
+  const t=$('#ed-text');editing=p;edVer=d.version;t.value=d.content;edSaved=t.value;  // the textarea's own copy
+  t.readOnly=!!d.readonly;$('#ed-save').disabled=!!d.readonly;
+  $('#ed-name').textContent='index.'+d.format;edMsg(d.readonly?'⚠ Read only ('+d.readonly+'): edit it where it lives.':'',!!d.readonly);
+  $('#ed-list').replaceChildren(...(d.files.length?d.files.map(f=>mk('li',{},
+    mk('a',{href:f.url,target:'_blank',rel:'noopener',textContent:f.name}),
+    mk('small',{textContent:size(f.size)+' · '+when(f.mtime),title:new Date(f.mtime*1000).toLocaleString()}))):
+    [mk('li',{className:'none',textContent:'No files: only the page itself.'})]));
+  $('#ed-files summary').textContent='Files in this page ('+d.files.length+')';
+  $('#page').hidden=true;$('#edit').hidden=false;crumb(p);t.setSelectionRange(0,0);t.focus();t.scrollTop=0}
+function closeEdit(force){
+  if(!force&&dirty()&&!confirm('Discard your unsaved changes?'))return false;
+  const p=editing;editing='';edSeq++;$('#edit').hidden=true;
+  if(p&&p===here()){$('#page').hidden=false;$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now();crumb(p)}
+  return true}
+async function saveEdit(){
+  const p=editing,text=$('#ed-text').value,my=edSeq;if(!p||saving===my||$('#ed-save').disabled)return;
+  saving=my;edMsg('Saving…');  // one save in flight per editor session
+  try{
+    const r=await fetch('/api/source',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:p,content:text,version:edVer})});
+    if(r.status===401){location='/login';return}
+    const d=await r.json().catch(()=>({}));
+    if(my!==edSeq||editing!==p)return;  // that editor is gone: its reply must not touch this one
+    if(r.status===409){edMsg('⚠ The page changed since you opened it. Copy your text, then Close and Edit again.',1);return}
+    if(!r.ok){edMsg('⚠ '+(d.detail||r.status),1);return}
+    edVer=d.version;edSaved=text;edMsg('Saved '+new Date().toLocaleTimeString())
+  }catch(e){if(my===edSeq)edMsg('⚠ Not saved: '+e.message,1)}
+  finally{if(saving===my)saving=-1}}
+$('#ed-save').onclick=saveEdit;$('#ed-cancel').onclick=()=>closeEdit();
+$('#ed-text').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveEdit()}});
+addEventListener('beforeunload',e=>{if(dirty())e.preventDefault()});
 let scope='';
 async function show(){
-  const p=decodeURIComponent(location.hash.slice(1));mark();
+  const p=decodeURIComponent(location.hash.slice(1));
+  if(editing&&p!==editing&&!closeEdit()){location.hash=editing;return}  // kept the unsaved text
+  mark();
   if(!scope){$('#scopename').textContent=p;$('#scope').hidden=!p}
   crumb(p);
   // the root (logo) and a folder with no page of its own show cards; no iframe (its 404 would be unthemed JSON)
   const sec=!!p&&!!document.querySelector('nav a.sec[data-path="'+CSS.escape(p)+'"]');
   if(!p||sec){$('#page').hidden=true;$('#cards').hidden=false;$('#page').src='about:blank';$('nav').classList.remove('open');return cards(p)}
+  if(editing)return;
   $('#cards').hidden=true;$('#page').hidden=false;
   $('#page').src='/view?path='+encodeURIComponent(p);$('nav').classList.remove('open');
 }

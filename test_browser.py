@@ -374,6 +374,79 @@ try:
         view.locator("#back").click()
         view.locator("h1", has_text="Share").wait_for(timeout=10000)
         assert off.locator("#list a.on").inner_text() == "Share" and not errs, errs
+        # editor: ✎ Edit shows the raw source and the folder's files; save, stale save, unsaved guard
+        pg.set_viewport_size({"width": 1200, "height": 800})
+        (tmp / "edme" / "assets").mkdir(parents=True)
+        (tmp / "edme" / "index.md").write_text("# Edme\n\nfirst text\n")
+        (tmp / "edme" / "notes.txt").write_text("n")
+        (tmp / "edme" / "assets" / "a.json").write_text("{}")
+        pg.goto(base + "/")
+        pg.reload()  # the tree must know the new page
+        pg.goto(base + "/#edme")
+        pg.locator("#crumb a.edl", has_text="Edit").click()
+        pg.locator("#edit").wait_for()
+        assert pg.locator("#page").is_hidden() and pg.input_value("#ed-text") == "# Edme\n\nfirst text\n"
+        assert pg.locator("#ed-list a").all_inner_texts() == ["notes.txt", "assets/a.json"], pg.locator("#ed-list a").all_inner_texts()
+        pg.fill("#ed-text", "# Edme\n\nsaved from the web\n")
+        pg.keyboard.press("Control+s")
+        pg.locator("#ed-msg", has_text="Saved").wait_for(timeout=5000)
+        assert (tmp / "edme" / "index.md").read_text() == "# Edme\n\nsaved from the web\n"
+        (tmp / "edme" / "index.md").write_text("# Edme\n\nchanged by the MCP\n")
+        pg.fill("#ed-text", "# Edme\n\nmine\n")
+        pg.click("#ed-save")
+        pg.locator("#ed-msg", has_text="changed since").wait_for(timeout=5000)
+        assert (tmp / "edme" / "index.md").read_text() == "# Edme\n\nchanged by the MCP\n", "stale save overwrote"
+        pg.once("dialog", lambda d: d.dismiss())  # unsaved text: leaving asks, and 'cancel' keeps the editor
+        pg.evaluate("location.hash='plan'")
+        pg.wait_for_timeout(500)
+        assert pg.evaluate("location.hash") == "#edme" and pg.locator("#edit").is_visible(), "unsaved text lost"
+        seen = []
+        pg.once("dialog", lambda d: (seen.append(d.message), d.accept()))
+        pg.locator("#crumb a.edl", has_text="View").click()
+        pg.frame_locator("#page").locator("text=changed by the MCP").wait_for(timeout=5000)
+        assert seen and pg.locator("#edit").is_hidden() and pg.locator("#page").is_visible(), seen
+        # Codex r1: a late reply of an older open/save never lands on the editor now open
+        pg.evaluate("""()=>{const f=window.fetch;let n=0;window.__slow=u=>String(u).startsWith('/api/source')&&n++===0;
+          window.fetch=(u,o)=>window.__slow(u)?new Promise(r=>setTimeout(()=>r(f(u,o)),1200)):f(u,o)}""")
+        pg.evaluate("openEdit('edme');openEdit('edme')")  # double click: the first reply comes last
+        pg.locator("#edit").wait_for()
+        pg.fill("#ed-text", "typed meanwhile")
+        pg.wait_for_timeout(1600)
+        assert pg.input_value("#ed-text") == "typed meanwhile", "a stale open replaced unsaved text"
+        (tmp / "other" / "index.md").parent.mkdir()
+        (tmp / "other" / "index.md").write_text("# Other\n")
+        pg.evaluate("""()=>{let n=0;const f=window.fetch;window.fetch=(u,o)=>o&&o.method==='POST'&&n++===0?
+          new Promise(r=>setTimeout(()=>r(f(u,o)),1200)):f(u,o)}""")
+        pg.evaluate("void saveEdit()")  # not awaited: slow save of edme, then the user opens another page
+        pg.evaluate("closeEdit(true);location.hash='other'")
+        pg.wait_for_timeout(300)
+        pg.evaluate("openEdit('other')")
+        pg.locator("#ed-name").wait_for()
+        pg.wait_for_function("editing==='other'")
+        ver = pg.evaluate("edVer")
+        pg.wait_for_timeout(1500)
+        assert pg.evaluate("[editing,edVer,dirty()]") == ["other", ver, False], "edme's save touched other's editor"
+        assert (tmp / "edme" / "index.md").read_text() == "typed meanwhile", "the slow save itself must still land"
+        # Codex r2: a slow save of one page never blocks saving the page opened after it
+        # the first POST is held until the second save is done: deterministic, no timing
+        pg.evaluate("""()=>{let n=0;const f=window.fetch,gate=new Promise(r=>window.__go=r);
+          window.fetch=(u,o)=>o&&o.method==='POST'&&n++===0?gate.then(()=>f(u,o)):f(u,o)}""")
+        pg.fill("#ed-text", "# Other\n\nedited\n")
+        pg.evaluate("void saveEdit()")  # other: slow
+        pg.evaluate("closeEdit(true);location.hash='edme'")
+        pg.wait_for_timeout(300)
+        pg.evaluate("openEdit('edme')")
+        pg.wait_for_function("editing==='edme'")
+        pg.fill("#ed-text", "edme again")
+        pg.evaluate("void saveEdit()")  # must not be swallowed by other's pending save
+        pg.locator("#ed-msg", has_text="Saved").wait_for(timeout=5000)
+        assert (tmp / "edme" / "index.md").read_text() == "edme again"
+        pg.evaluate("window.__go()")  # now let other's save through
+        for _ in range(50):
+            if (tmp / "other" / "index.md").read_text() == "# Other\n\nedited\n":
+                break
+            pg.wait_for_timeout(100)
+        assert (tmp / "other" / "index.md").read_text() == "# Other\n\nedited\n"
         b.close()
 finally:  # the whole group: an edit reindexes, which spawns the embedder child
     os.killpg(srv.pid, signal.SIGTERM)
