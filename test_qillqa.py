@@ -426,6 +426,19 @@ assert "from 'https://qillqa.invalid/exp/sub/app/lib.js'" in main_js and "from '
 assert '"https://qillqa.invalid/exp/sub/app/lib.js"' in lib_js and "import.meta" not in lib_js, lib_js
 assert app["imports"]["k"] == "https://qillqa.invalid/exp/sub/app/lib.js", app["imports"]
 assert exporter._resolve("three/addons/x.js", "https://a/b/", {"three/addons/": "https://cdn/jsm/"}) == "https://cdn/jsm/x.js"
+assert man["pages"][0]["md"] and not app["md"], "markdown pages are flagged (they run sandboxed, no scripts)"
+# no SSRF: only https on public CDNs is ever fetched; anything else stays online and is reported
+_calls = []
+_real_urlopen = exporter.urllib.request.urlopen
+exporter.urllib.request.urlopen = lambda *a, **k: _calls.append(a) or (_ for _ in ()).throw(OSError("blocked"))
+for bad in ("http://127.0.0.1:8080/x.js", "https://192.168.1.5/x.js", "http://cdn.jsdelivr.net/x.js", "file:///etc/passwd"):
+    assert exporter._fetch(bad) is None, bad
+assert not _calls, f"fetched a forbidden URL: {_calls}"
+(server.PAGES / "expl").mkdir()
+(server.PAGES / "expl" / "index.html").write_text('<script src="http://127.0.0.1:8080/api/x.js"></script>')
+_, _, rep = exporter.build("expl")
+assert not _calls and not rep["offline"] and rep["needs_internet_for"] == ["http://127.0.0.1:8080/api/x.js"], rep
+exporter.urllib.request.urlopen = _real_urlopen
 r = c.get("/api/export?path=exp&subpages=1")
 assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment"), r.headers
 assert r.headers["content-security-policy"] == "sandbox" and r.headers["x-qillqa-offline"] == "yes"

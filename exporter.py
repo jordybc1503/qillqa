@@ -31,6 +31,7 @@ from server import INDEX_NAMES, PAGES, VAR, _index, _rel, _safe, _title
 
 BASE = "https://qillqa.invalid/"
 WARN_BYTES = 40 * 2**20
+CDN_HOSTS = {"cdn.jsdelivr.net", "unpkg.com", "esm.sh", "cdnjs.cloudflare.com", "ga.jspm.io", "cdn.skypack.dev"}
 for ext, mime in ((".glb", "model/gltf-binary"), (".gltf", "model/gltf+json"), (".js", "text/javascript"),
                   (".mjs", "text/javascript"), (".wasm", "application/wasm"), (".webp", "image/webp"),
                   (".hdr", "image/vnd.radiance"), (".md", "text/markdown")):
@@ -74,13 +75,24 @@ def _page_html(page: Path) -> str:
     return webui._render_md(_title(page), text)
 
 
+def _allowed(url: str) -> bool:
+    u = urllib.parse.urlparse(url)
+    return u.scheme == "https" and (u.hostname or "") in CDN_HOSTS
+
+
 def _fetch(url: str) -> bytes | None:
-    """A CDN file, cached under var/export-cache. None if it cannot be fetched."""
+    """A CDN file, cached under var/export-cache. None if it is not on an allowed public CDN
+    (a page must never make the server fetch 127.0.0.1 or the LAN into a shared file) or
+    cannot be fetched."""
+    if not _allowed(url):
+        return None
     cache = VAR / "export-cache" / hashlib.sha1(url.encode()).hexdigest()
     if cache.exists():
         return cache.read_bytes()
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "qillqa-export"}), timeout=20) as r:
+            if not _allowed(r.geturl()):  # a redirect left the allowlist
+                return None
             data = r.read()
     except Exception:
         return None
@@ -190,7 +202,7 @@ def build(path: str, subpages: bool = False) -> tuple[str, bytes, dict]:
                     b.cdn[url] = b.add(data, "text/javascript")
         for spec, target in imap.items():  # keep online fallbacks for what was not resolved
             imports.setdefault(spec, urllib.parse.urljoin(base, target))
-        out_pages.append({"path": rel, "title": _title(page), "base": base,
+        out_pages.append({"path": rel, "title": _title(page), "base": base, "md": _index(page).suffix == ".md",
                           "html": b.add(page_html.encode(), "text/html"), "files": files, "imports": imports,
                           "depth": len(page.relative_to(root).parts)})
     name = (root.name or "qillqa") + ".html"
@@ -253,7 +265,9 @@ for(const p of['innerHTML','outerHTML']){const d=Object.getOwnPropertyDescriptor
   Object.defineProperty(Element.prototype,p,{...d,set(v){d.set.call(this,fix(v))}})}
 const I=Element.prototype.insertAdjacentHTML;Element.prototype.insertAdjacentHTML=function(w,s){return I.call(this,w,fix(s))};
 document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('a[href]');if(!a)return;
-  const m=(a.getAttribute('href')||'').match(/^\/?#(.+)$/);if(m&&a.target==='_top'){e.preventDefault();parent.postMessage({qx:decodeURIComponent(m[1])},'*')}},true);
+  const h=a.getAttribute('href')||'',m=h.match(/^\/?#(.+)$/);
+  if(m&&a.target==='_top'){e.preventDefault();parent.postMessage({qx:decodeURIComponent(m[1])},'*')}
+  else if(h[0]==='#'&&h.length>1){e.preventDefault();const t=document.getElementById(decodeURIComponent(h.slice(1)));t&&t.scrollIntoView()}},true);  // the <base> would send #x elsewhere
 })();`;
 const byPath=Object.fromEntries(D.pages.map(p=>[p.path,p]));
 async function open(path){
@@ -265,18 +279,27 @@ async function open(path){
   for(const u in map)if(/\.m?js$/i.test(u)||u in D.cdn)imports[u]=map[u];
   let h=(await text(p.html)).replace(/<script\b[^>]*\btype\s*=\s*["']?importmap["']?[^>]*>[\s\S]*?<\/script>/gi,'');
   const res=v=>{try{const x=new URL(v,p.base);x.hash='';x.search='';return map[x.href]}catch(e){}};
-  h=h.replace(/(\s(?:src|href|poster|data)\s*=\s*)(["'])([^"']*)\2/gi,(m,a,q,v)=>{const b=res(v);return b?a+q+b+q:m})
+  const here=location.href.split('#')[0];
+  h=h.replace(/(\s(?:src|href|poster|data)\s*=\s*)(["'])([^"']*)\2/gi,(m,a,q,v)=>{
+       const pl=/href/i.test(a)&&v.match(/^\/?#(.+)$/);  // a link to another notebook page
+       if(pl){const t=decodeURIComponent(pl[1]);return byPath[t]?a+q+here+'#'+encodeURIComponent(t)+q:a.replace(/href/i,'data-href')+q+v+q}
+       const b=res(v);return b?a+q+b+q:m})
      .replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=res(v);return b?'url('+q+b+q+')':m});
-  const head='<base href="'+p.base+'"><script>window.__qx='+JSON.stringify(map).replace(/</g,'\\u003c')+';'+SHIM+'<\/script>'+
+  // markdown pages: no scripts at all (as in qillqa), so no shim; their links were rewritten above
+  const head=p.md?'':'<base href="'+p.base+'"><script>window.__qx='+JSON.stringify(map).replace(/</g,'\\u003c')+';'+SHIM+'<\/script>'+
     '<script type="importmap">'+JSON.stringify({imports}).replace(/</g,'\\u003c')+'<\/script>';
   h=/<head[^>]*>/i.test(h)?h.replace(/<head[^>]*>/i,m=>m+head):head+h;
-  const f=$('view');f.onload=()=>{$('wait').hidden=true};f.srcdoc=h;document.title=p.title;
+  const f=$('view');f.onload=()=>{$('wait').hidden=true};
+  if(p.md)f.setAttribute('sandbox','allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation');
+  else f.removeAttribute('sandbox');
+  f.srcdoc=h;document.title=p.title;
   document.body.classList.remove('open');if(location.hash.slice(1)!==encodeURIComponent(p.path))history.replaceState(null,'','#'+encodeURIComponent(p.path));
 }
 for(const p of D.pages){const a=document.createElement('a');a.href='#'+encodeURIComponent(p.path);a.dataset.p=p.path;
   a.textContent=p.title;a.style.paddingLeft=(8+14*p.depth)+'px';a.onclick=e=>{e.preventDefault();open(p.path)};$('list').append(a)}
 $('menu').onclick=()=>document.body.classList.toggle('open');
 addEventListener('message',e=>{if(e.data&&e.data.qx&&byPath[e.data.qx])open(e.data.qx)});
+addEventListener('hashchange',()=>open(decodeURIComponent(location.hash.slice(1))));  // markdown page links
 open(decodeURIComponent(location.hash.slice(1)));
 })();"""
 

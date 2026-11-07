@@ -316,7 +316,8 @@ try:
 
         # export: a page + subpages as one .html, opened from disk with the network cut off
         (tmp / "share" / "sub").mkdir(parents=True)
-        (tmp / "share" / "index.md").write_text("# Share\n\n![dot](dot.png)\n\n[to the subpage](#share/sub)\n")
+        (tmp / "share" / "index.md").write_text("# Share\n\n![dot](dot.png)\n\n[to the subpage](#share/sub)\n\n"
+                                               '<img src="nope.png" onerror="parent.document.title=\'pwned\'">\n')
         (tmp / "share" / "dot.png").write_bytes(bytes.fromhex(
             "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
             "1f15c4890000000d49444154789c63f8cfc0f01f0005000201e5274e"
@@ -328,13 +329,15 @@ try:
         out.write_bytes(got.body())
         off = b.new_page(viewport={"width": 1000, "height": 700})
         errs = []
-        off.on("console", lambda m: m.type == "error" and errs.append(m.text))
+        off.on("console", lambda m: m.type == "error" and not re.search(r"Blocked script execution|ERR_FILE_NOT_FOUND", m.text) and errs.append(m.text))  # the sandbox blocking the onerror test, and its missing nope.png
         off.route("http*://**", lambda r: r.abort())
         off.goto(out.as_uri())
         view = off.frame_locator("#view")
         view.locator("h1", has_text="Share").wait_for(timeout=10000)
-        assert view.locator("img").evaluate("i=>i.decode().then(()=>i.naturalWidth)") == 1, "embedded image"
+        assert view.locator("img[alt=dot]").evaluate("i=>i.decode().then(()=>i.naturalWidth)") == 1, "embedded image"
         assert off.locator("#list a").count() == 2, "page list"
+        off.wait_for_timeout(500)
+        assert off.title() != "pwned", "a script in a markdown page ran in the export"
         view.locator("a", has_text="to the subpage").click()
         view.locator("text=hello from the subpage").wait_for(timeout=10000)
         assert off.locator("#list a.on").inner_text() == "Sub" and not errs, errs
