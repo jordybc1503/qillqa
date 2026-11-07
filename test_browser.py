@@ -191,10 +191,12 @@ try:
         # breadcrumb: every parent is a link, the current page is not; "Projects" goes back to the cards
         pg.goto(base + "/#proj/sub")
         pg.locator("#crumb a").first.wait_for()
-        assert pg.locator("#crumb").inner_text() == "Projects / proj / sub", pg.locator("#crumb").inner_text()
-        assert pg.locator("#crumb a").all_inner_texts() == ["Projects", "proj"], pg.locator("#crumb a").all_inner_texts()
+        crumb_text = pg.evaluate("[...document.querySelector('#crumb').childNodes].filter(n=>!(n.classList&&n.classList.contains('exps'))).map(n=>n.textContent).join('')")
+        assert crumb_text == "Projects / proj / sub", crumb_text
+        assert pg.get_attribute("#crumb a.exp", "href") == "/api/export?path=proj%2Fsub", "export link"
+        assert pg.locator("#crumb > a").all_inner_texts() == ["Projects", "proj"], pg.locator("#crumb > a").all_inner_texts()
         pg.click("#crumb a:text-is('proj')")
-        pg.wait_for_function("document.querySelector('#crumb').innerText === 'Projects / proj'")
+        pg.wait_for_function("[...document.querySelector('#crumb').childNodes].filter(n=>!(n.classList&&n.classList.contains('exps'))).map(n=>n.textContent).join('') === 'Projects / proj'")
         pg.click("#crumb a:text-is('Projects')")
         pg.locator(".card").first.wait_for()
         assert pg.inner_text("#cards-title") == "Projects" and pg.inner_text("#crumb") == "", "Projects did not go back to the cards"
@@ -311,6 +313,31 @@ try:
         rerendered(c0, "no reload after 409")
         assert md.read_text() == before, "a stale page overwrote the file"
         assert fr.locator("tr", has_text="(edited)").count() == 1, "no reload after 409"
+
+        # export: a page + subpages as one .html, opened from disk with the network cut off
+        (tmp / "share" / "sub").mkdir(parents=True)
+        (tmp / "share" / "index.md").write_text("# Share\n\n![dot](dot.png)\n\n[to the subpage](#share/sub)\n")
+        (tmp / "share" / "dot.png").write_bytes(bytes.fromhex(
+            "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+            "1f15c4890000000d49444154789c63f8cfc0f01f0005000201e5274e"
+            "c70000000049454e44ae426082"))
+        (tmp / "share" / "sub" / "index.md").write_text("# Sub\n\nhello from the subpage\n")
+        got = pg.request.get(base + "/api/export?path=share&subpages=1")
+        assert got.ok and got.headers["content-disposition"].startswith("attachment"), got.headers
+        out = tmp / "share.html"
+        out.write_bytes(got.body())
+        off = b.new_page(viewport={"width": 1000, "height": 700})
+        errs = []
+        off.on("console", lambda m: m.type == "error" and errs.append(m.text))
+        off.route("http*://**", lambda r: r.abort())
+        off.goto(out.as_uri())
+        view = off.frame_locator("#view")
+        view.locator("h1", has_text="Share").wait_for(timeout=10000)
+        assert view.locator("img").evaluate("i=>i.decode().then(()=>i.naturalWidth)") == 1, "embedded image"
+        assert off.locator("#list a").count() == 2, "page list"
+        view.locator("a", has_text="to the subpage").click()
+        view.locator("text=hello from the subpage").wait_for(timeout=10000)
+        assert off.locator("#list a.on").inner_text() == "Sub" and not errs, errs
         b.close()
 finally:  # the whole group: an edit reindexes, which spawns the embedder child
     os.killpg(srv.pid, signal.SIGTERM)

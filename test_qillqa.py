@@ -385,4 +385,51 @@ with server.page_lock():
 w.join(5)
 assert got["r"].status_code == 409 and "added by the MCP" in p.read_text(), got["r"].text
 
+# export: one self-contained .html, files round-trip, module specifiers made absolute
+import base64 as _b64  # noqa: E402
+import json as _json  # noqa: E402
+import exporter  # noqa: E402
+
+png = bytes(range(256)) * 4
+(server.PAGES / "exp" / "sub" / "app").mkdir(parents=True)
+(server.PAGES / "exp" / "index.md").write_text("# Exp\n\n![photo](photo.png)\n\n[sub](#exp/sub)\n")
+(server.PAGES / "exp" / "photo.png").write_bytes(png)
+(server.PAGES / "exp" / "sub" / "index.md").write_text("# Sub\n\nhello\n")
+(server.PAGES / "exp" / "sub" / "app" / "index.html").write_text(
+    '<!doctype html><html><head><script type="importmap">{"imports":{"k":"./lib.js"}}</script></head>'
+    '<body><script type="module" src="main.js"></script></body></html>')
+(server.PAGES / "exp" / "sub" / "app" / "main.js").write_text("import {v} from './lib.js';import k from 'k';\n")
+(server.PAGES / "exp" / "sub" / "app" / "lib.js").write_text("export const v=new URL('x.bin', import.meta.url);\n")
+
+
+def _unpack(doc):
+    s = doc.decode()
+    man = _json.loads(re.search(r'id="qx">(.*?)</script>', s, re.S).group(1).replace("<\\/", "</"))
+    blob = lambda i: _b64.b64decode(re.search(rf'id="qf{i}">([^<]*)</script>', s).group(1))  # noqa: E731
+    return man, blob
+
+
+name, doc, rep = exporter.build("exp")
+man, blob = _unpack(doc)
+assert name == "exp.html" and rep["pages"] == ["exp"] and rep["offline"], rep
+page = man["pages"][0]
+assert blob(page["files"]["https://qillqa.invalid/exp/photo.png"]) == png, "file bytes must round-trip"
+assert 'href="/#exp/sub"' in blob(page["html"]).decode(), "page link kept for the in-file navigation"
+_, doc, rep = exporter.build("exp", subpages=True)
+man, blob = _unpack(doc)
+assert rep["pages"] == ["exp", "exp/sub", "exp/sub/app"], rep["pages"]
+assert all("photo.png" not in u for p in man["pages"][1:] for u in p["files"]), "a page owns only its files"
+app = man["pages"][2]
+main_js = blob(app["files"]["https://qillqa.invalid/exp/sub/app/main.js"]).decode()
+lib_js = blob(app["files"]["https://qillqa.invalid/exp/sub/app/lib.js"]).decode()
+assert "from 'https://qillqa.invalid/exp/sub/app/lib.js'" in main_js and "from 'k'" in main_js, main_js
+assert '"https://qillqa.invalid/exp/sub/app/lib.js"' in lib_js and "import.meta" not in lib_js, lib_js
+assert app["imports"]["k"] == "https://qillqa.invalid/exp/sub/app/lib.js", app["imports"]
+assert exporter._resolve("three/addons/x.js", "https://a/b/", {"three/addons/": "https://cdn/jsm/"}) == "https://cdn/jsm/x.js"
+r = c.get("/api/export?path=exp&subpages=1")
+assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment"), r.headers
+assert r.headers["content-security-policy"] == "sandbox" and r.headers["x-qillqa-offline"] == "yes"
+assert anon.get("/api/export?path=exp").status_code == 401
+assert c.get("/api/export?path=nope").status_code == 404 and c.get("/api/export?path=").status_code == 404
+
 print("OK: all checks pass")
