@@ -194,9 +194,11 @@ try:
         crumb_text = pg.evaluate("[...document.querySelector('#crumb').childNodes].filter(n=>!(n.classList&&n.classList.contains('exps'))).map(n=>n.textContent).join('')")
         assert crumb_text == "Projects / proj / sub", crumb_text
         assert pg.get_attribute("#crumb a.exp", "href") == "/api/export?path=proj%2Fsub", "export link"
+        assert pg.locator("#crumb a.exp").count() == 1, "a page with no subpages offers no '+ subpages'"
         assert pg.locator("#crumb > a").all_inner_texts() == ["Projects", "proj"], pg.locator("#crumb > a").all_inner_texts()
         pg.click("#crumb a:text-is('proj')")
         pg.wait_for_function("[...document.querySelector('#crumb').childNodes].filter(n=>!(n.classList&&n.classList.contains('exps'))).map(n=>n.textContent).join('') === 'Projects / proj'")
+        assert pg.locator("#crumb a.exp").all_inner_texts() == ["⤓ Export", "⤓ + subpages"], "page with a subpage"
         pg.click("#crumb a:text-is('Projects')")
         pg.locator(".card").first.wait_for()
         assert pg.inner_text("#cards-title") == "Projects" and pg.inner_text("#crumb") == "", "Projects did not go back to the cards"
