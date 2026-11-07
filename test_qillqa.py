@@ -385,4 +385,128 @@ with server.page_lock():
 w.join(5)
 assert got["r"].status_code == 409 and "added by the MCP" in p.read_text(), got["r"].text
 
+# export: one self-contained .html, files round-trip, module specifiers made absolute
+import base64 as _b64  # noqa: E402
+import json as _json  # noqa: E402
+import exporter  # noqa: E402
+
+png = bytes(range(256)) * 4
+(server.PAGES / "exp" / "sub" / "app").mkdir(parents=True)
+(server.PAGES / "exp" / "index.md").write_text("# Exp\n\n![photo](photo.png)\n\n[sub](#exp/sub)\n")
+(server.PAGES / "exp" / "photo.png").write_bytes(png)
+(server.PAGES / "exp" / "sub" / "index.md").write_text("# Sub\n\nhello\n")
+(server.PAGES / "exp" / "sub" / "app" / "index.html").write_text(
+    '<!doctype html><html><head><script type="importmap">{"imports":{"k":"./lib.js"}}</script></head>'
+    '<body><script type="module" src="main.js"></script></body></html>')
+(server.PAGES / "exp" / "sub" / "app" / "main.js").write_text("import {v} from './lib.js';import k from 'k';\n")
+(server.PAGES / "exp" / "sub" / "app" / "lib.js").write_text("export const v=new URL('x.bin', import.meta.url);\n")
+
+
+def _unpack(doc):
+    s = doc.decode()
+    man = _json.loads(re.search(r'id="qx">(.*?)</script>', s, re.S).group(1).replace("<\\/", "</"))
+    blob = lambda i: _b64.b64decode(re.search(rf'id="qf{i}">([^<]*)</script>', s).group(1))  # noqa: E731
+    return man, blob
+
+
+name, doc, rep = exporter.build("exp")
+man, blob = _unpack(doc)
+assert name == "exp.html" and rep["pages"] == ["exp"] and rep["offline"], rep
+page = man["pages"][0]
+assert blob(page["files"]["https://qillqa.invalid/exp/photo.png"]) == png, "file bytes must round-trip"
+assert 'href="/#exp/sub"' in blob(page["html"]).decode(), "page link kept for the in-file navigation"
+_, doc, rep = exporter.build("exp", subpages=True)
+man, blob = _unpack(doc)
+assert rep["pages"] == ["exp", "exp/sub", "exp/sub/app"], rep["pages"]
+assert all("photo.png" not in u for p in man["pages"][1:] for u in p["files"]), "a page owns only its files"
+app = man["pages"][2]
+main_js = blob(app["files"]["https://qillqa.invalid/exp/sub/app/main.js"]).decode()
+lib_js = blob(app["files"]["https://qillqa.invalid/exp/sub/app/lib.js"]).decode()
+assert "from 'https://qillqa.invalid/exp/sub/app/lib.js'" in main_js and "from 'k'" in main_js, main_js
+assert '"https://qillqa.invalid/exp/sub/app/lib.js"' in lib_js and "import.meta" not in lib_js, lib_js
+assert app["imports"]["k"] == "https://qillqa.invalid/exp/sub/app/lib.js", app["imports"]
+assert exporter._resolve("three/addons/x.js", "https://a/b/", {"three/addons/": "https://cdn/jsm/"}) == "https://cdn/jsm/x.js"
+assert man["pages"][0]["md"] and not app["md"], "markdown pages are flagged (they run sandboxed, no scripts)"
+# no SSRF: only https on public CDNs is ever fetched; anything else stays online and is reported
+_calls = []
+_real_urlopen = exporter.urllib.request.urlopen
+exporter.urllib.request.urlopen = lambda *a, **k: _calls.append(a) or (_ for _ in ()).throw(OSError("blocked"))
+for bad in ("http://127.0.0.1:8080/x.js", "https://192.168.1.5/x.js", "http://cdn.jsdelivr.net/x.js", "file:///etc/passwd"):
+    assert exporter._fetch(bad) is None, bad
+assert not _calls, f"fetched a forbidden URL: {_calls}"
+(server.PAGES / "expl").mkdir()
+(server.PAGES / "expl" / "index.html").write_text('<script src="http://127.0.0.1:8080/api/x.js"></script>')
+_, _, rep = exporter.build("expl")
+assert not _calls and not rep["offline"] and rep["needs_internet_for"] == ["http://127.0.0.1:8080/api/x.js"], rep
+exporter.urllib.request.urlopen = _real_urlopen
+# Codex r1: a redirect is checked before it is followed
+_req = exporter.urllib.request.Request("https://cdn.jsdelivr.net/x.js")
+try:
+    exporter._CdnOnlyRedirects().redirect_request(_req, None, 302, "Found", {}, "http://127.0.0.1:8080/private")
+    raise AssertionError("followed a redirect to 127.0.0.1")
+except exporter.urllib.error.HTTPError:
+    pass
+# Codex r1: a symlink to a file outside the notebook is never embedded
+(tmp / "secret.txt").write_text("private")
+(server.PAGES / "exp" / "leak.txt").symlink_to(tmp / "secret.txt")
+assert all("leak" not in u for u in _unpack(exporter.build("exp")[1])[0]["pages"][0]["files"]), "symlink leaked"
+# Codex r1: a CDN <script type=module src> keeps its relative imports; JS strings stay valid
+_fake = {"https://cdn.jsdelivr.net/m/main.js": b"import {d} from './dep.js';const s=\"import.meta.url\";",
+         "https://cdn.jsdelivr.net/m/dep.js": b"export const d=import.meta.url;"}
+_real_fetch, exporter._fetch = exporter._fetch, lambda u: _fake.get(u)
+(server.PAGES / "cdnmod").mkdir()
+(server.PAGES / "cdnmod" / "index.html").write_text(
+    '<title>t</title><script type=module src="https://cdn.jsdelivr.net/m/main.js"></script>')
+_, doc, rep = exporter.build("cdnmod")
+man, blob = _unpack(doc)
+assert rep["offline"] and set(man["cdn"]) == set(_fake), (rep, man["cdn"])
+m_js = blob(man["cdn"]["https://cdn.jsdelivr.net/m/main.js"]).decode()
+assert "from 'https://cdn.jsdelivr.net/m/dep.js'" in m_js and 's="import.meta.url"' in m_js, m_js
+assert '"https://cdn.jsdelivr.net/m/dep.js"' in blob(man["cdn"]["https://cdn.jsdelivr.net/m/dep.js"]).decode()
+exporter._fetch = _real_fetch
+# Codex r1: a hostile title cannot reach the HTML parser from the manifest; same bytes, other type = other blob
+(server.PAGES / "evil").mkdir()
+(server.PAGES / "evil" / "index.md").write_text("# <!--<script> x\n")
+(server.PAGES / "evil" / "a.txt").write_text("export const v=1;")
+(server.PAGES / "evil" / "b.js").write_text("export const v=1;")
+doc = exporter.build("evil")[1].decode()
+assert "<" not in re.search(r'id="qx">(.*?)</script>', doc, re.S).group(1), "raw < in the manifest"
+evp = _unpack(exporter.build("evil")[1])[0]["pages"][0]["files"]
+assert evp["https://qillqa.invalid/evil/a.txt"] != evp["https://qillqa.invalid/evil/b.js"], "MIME lost by dedup"
+# Codex r1: import-map targets resolve against the page, not against the importing module
+(server.PAGES / "imap" / "js").mkdir(parents=True)
+(server.PAGES / "imap" / "index.html").write_text(
+    '<script type="importmap">{"imports":{"lib":"./lib.js"}}</script><script type=module src="js/main.js"></script>')
+(server.PAGES / "imap" / "lib.js").write_text("export const x=1;")
+(server.PAGES / "imap" / "js" / "main.js").write_text("import {x} from 'lib';")
+assert _unpack(exporter.build("imap")[1])[0]["pages"][0]["imports"]["lib"] == "https://qillqa.invalid/imap/lib.js"
+# Codex r2: rewriting touches code only (not strings, templates, comments, regex literals)
+_U = "https://cdn.jsdelivr.net/p/app.js"
+for _src, _want in {
+    'const s="value: import.meta.url here";': 'const s="value: import.meta.url here";',
+    "const t=`a ${import.meta.url} b import.meta.url`;": 'const t=`a ${"%s"} b import.meta.url`;' % _U,
+    "// import x from './c.js'\nimport y from './d.js';": "// import x from './c.js'\nimport y from 'https://cdn.jsdelivr.net/p/d.js';",
+    "const r=/['\"]/g; import z from './e.js';": "const r=/['\"]/g; import z from 'https://cdn.jsdelivr.net/p/e.js';",
+    "a = b / c; const u=import.meta.url;": 'a = b / c; const u="%s";' % _U,
+    'i++ / 2; const s="v import.meta.url";': 'i++ / 2; const s="v import.meta.url";',
+    'o.return / 2; const s="v import.meta.url";': 'o.return / 2; const s="v import.meta.url";',
+    "const k=`${/'/.test(a)}`; const u=import.meta.url;": 'const k=`${/\'/.test(a)}`; const u="%s";' % _U,
+}.items():
+    assert exporter._rewrite_js(_src, _U) == _want, (_src, exporter._rewrite_js(_src, _U))
+# Codex r2: a data-src is not the src; a symlinked root index never gives its title
+_tags = exporter._Scripts('<script data-src="https://cdn.jsdelivr.net/wrong.js" src="https://cdn.jsdelivr.net/main.js" '
+                          'type=module></script>').tags
+assert _tags == [{"src": "https://cdn.jsdelivr.net/main.js", "type": "module", "body": ""}], _tags
+(tmp / "outside.html").write_text("<title>SECRET TITLE</title>")
+(server.PAGES / "symroot" / "kid").mkdir(parents=True)
+(server.PAGES / "symroot" / "index.html").symlink_to(tmp / "outside.html")
+(server.PAGES / "symroot" / "kid" / "index.md").write_text("# Kid\n")
+_doc = exporter.build("symroot")[1].decode()
+assert "SECRET" not in _doc and "<title>symroot</title>" in _doc, "symlinked root title leaked"
+r = c.get("/api/export?path=exp&subpages=1")
+assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment"), r.headers
+assert r.headers["content-security-policy"] == "sandbox" and r.headers["x-qillqa-offline"] == "yes"
+assert anon.get("/api/export?path=exp").status_code == 401
+assert c.get("/api/export?path=nope").status_code == 404 and c.get("/api/export?path=").status_code == 404
+
 print("OK: all checks pass")

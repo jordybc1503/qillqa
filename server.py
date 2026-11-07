@@ -670,6 +670,26 @@ def start_server() -> str:
     return _dump(start)
 
 
+def _export(path: str, subpages: bool, out: str) -> dict:
+    import exporter  # lazy: it imports this module
+    name, doc, report = exporter.build(path, subpages)
+    dest = Path(out).expanduser() if out else VAR / "exports" / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(doc)
+    return {**report, "out": str(dest)}
+
+
+@mcp.tool()
+def export_page(path: str, subpages: bool = False, out: str = "") -> str:
+    """Export a page to ONE self-contained .html file that opens on any device, even offline
+    (double click, WhatsApp, e-mail): its photos, videos, 3D models and scripts, plus the CDN
+    libraries it imports, are all inside. `subpages=True` adds every subpage with a page list;
+    a folder that has no page of its own exports everything under it. Writes to `out` or
+    var/exports/<name>.html and returns the path, the size, the largest files and whether it
+    still needs internet for something it could not embed."""
+    return _dump(_export, path, subpages, out)
+
+
 @mcp.tool()
 def server_status() -> str:
     """Report whether the qillqa web server is up, and its URL."""

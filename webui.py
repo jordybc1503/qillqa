@@ -666,6 +666,22 @@ def _page_link(m: re.Match, body: str) -> str:
     return f'<a target="_top" href="/#{frag}"'
 
 
+@app.get("/api/export")
+def api_export(path: str = "", subpages: bool = False):
+    """One self-contained .html (exporter.py). Always a download: its scripts must never run at
+    the qillqa origin, where they would have the session cookie."""
+    import exporter
+    try:
+        name, doc, report = exporter.build(path, subpages)
+    except ValueError as e:
+        _bad(e)
+    return Response(doc, media_type="text/html; charset=utf-8", headers={
+        **_SAFE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": "sandbox",
+        "Content-Disposition": f"attachment; filename=\"{name.encode('ascii', 'replace').decode().replace(chr(34), '_')}\"; "
+                               f"filename*=UTF-8''{urllib.parse.quote(name)}",
+        "X-Qillqa-Offline": "yes" if report["offline"] else "no"})
+
+
 @app.get("/view")
 def view(path: str = ""):
     """Open the page (session required) at its signed URL."""
@@ -847,6 +863,7 @@ nav a.on{background:color-mix(in srgb,var(--c3) 14%,var(--card));color:color-mix
 box-shadow:inset 3px 0 0 var(--c3)}
 section{display:flex;flex-direction:column;min-width:0}iframe{flex:1;border:0;width:100%;background:var(--bg)}
 #crumb{padding:6px 16px;color:var(--mute);font-size:.85em;font-weight:600;overflow-wrap:anywhere}
+#crumb .exps{float:right;display:flex;gap:12px;color:inherit}#crumb a.exp{font-weight:500;white-space:nowrap}
 #crumb a{color:var(--c1);text-decoration:none;border-radius:4px}#crumb a:hover,#crumb a:focus-visible{color:var(--c3);text-decoration:underline}#crumb span{color:var(--fg)}
 /* root (logo) and folders without a page: one card per project, last changed first */
 #cards{flex:1;overflow:auto;padding:4px 16px 24px}
@@ -930,6 +947,10 @@ function mark(){const p=decodeURIComponent(location.hash.slice(1));
 // breadcrumb: Projects / a / b / page — every parent is a link
 function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'#',textContent:'Projects'})]:[];
   parts.forEach((s,i)=>out.push(' / ',i<parts.length-1?mk('a',{href:'#'+parts.slice(0,i+1).join('/'),textContent:s}):mk('span',{textContent:s})));
+  // export: one .html that opens on any device, offline (a folder with no page exports what is under it)
+  const n=p&&nodeAt(nodes,p),ex=(t,sub)=>mk('a',{className:'exp',download:'',textContent:t,
+    href:'/api/export?path='+encodeURIComponent(p)+(sub?'&subpages=1':''),title:'Download one .html file that opens on any device, even offline'});
+  if(n)out.push(mk('span',{className:'exps'},ex('⤓ Export',0),...(n.children.length&&!document.querySelector('nav a.sec[data-path="'+CSS.escape(p)+'"]')?[ex('⤓ + subpages',1)]:[])));
   $('#crumb').replaceChildren(...out)}
 let scope='';
 async function show(){
