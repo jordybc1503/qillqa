@@ -424,7 +424,7 @@ async function open(path){
   async function sheet(u,seen){if(map[u]||seen.has(u))return;seen.add(u);const t=await text(cssId[u]);
     for(const m of t.matchAll(/@import\s+(?:url\(\s*)?(?:(["'])(.*?)\1|([^"')\s;]+))/g)){
       try{const x=new URL(m[2]??m[3],u);x.hash='';x.search='';
-        if(cssId[x.href]){await sheet(x.href,seen);if(!map[x.href])cycle.add(u)}}catch(e){}}
+        if(x.href in cssId){await sheet(x.href,seen);if(!map[x.href])cycle.add(u)}}catch(e){}}
     const k=cssId[u]+'@'+u;if(!made[k])made[k]=URL.createObjectURL(new Blob([cssFix(t,u)],{type:'text/css'}));map[u]=made[k]}
   for(const[u]of css)await sheet(u,new Set());
   for(const u of cycle)map[u]=URL.createObjectURL(new Blob([cssFix(await text(cssId[u]),u)],{type:'text/css'}));  // a.css <-> z.css
