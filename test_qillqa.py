@@ -480,6 +480,26 @@ assert evp["https://qillqa.invalid/evil/a.txt"] != evp["https://qillqa.invalid/e
 (server.PAGES / "imap" / "lib.js").write_text("export const x=1;")
 (server.PAGES / "imap" / "js" / "main.js").write_text("import {x} from 'lib';")
 assert _unpack(exporter.build("imap")[1])[0]["pages"][0]["imports"]["lib"] == "https://qillqa.invalid/imap/lib.js"
+# Codex r2: rewriting touches code only (not strings, templates, comments, regex literals)
+_U = "https://cdn.jsdelivr.net/p/app.js"
+for _src, _want in {
+    'const s="value: import.meta.url here";': 'const s="value: import.meta.url here";',
+    "const t=`a ${import.meta.url} b import.meta.url`;": 'const t=`a ${"%s"} b import.meta.url`;' % _U,
+    "// import x from './c.js'\nimport y from './d.js';": "// import x from './c.js'\nimport y from 'https://cdn.jsdelivr.net/p/d.js';",
+    "const r=/['\"]/g; import z from './e.js';": "const r=/['\"]/g; import z from 'https://cdn.jsdelivr.net/p/e.js';",
+    "a = b / c; const u=import.meta.url;": 'a = b / c; const u="%s";' % _U,
+}.items():
+    assert exporter._rewrite_js(_src, _U) == _want, (_src, exporter._rewrite_js(_src, _U))
+# Codex r2: a data-src is not the src; a symlinked root index never gives its title
+_tags = exporter._Scripts('<script data-src="https://cdn.jsdelivr.net/wrong.js" src="https://cdn.jsdelivr.net/main.js" '
+                          'type=module></script>').tags
+assert _tags == [{"src": "https://cdn.jsdelivr.net/main.js", "type": "module", "body": ""}], _tags
+(tmp / "outside.html").write_text("<title>SECRET TITLE</title>")
+(server.PAGES / "symroot" / "kid").mkdir(parents=True)
+(server.PAGES / "symroot" / "index.html").symlink_to(tmp / "outside.html")
+(server.PAGES / "symroot" / "kid" / "index.md").write_text("# Kid\n")
+_doc = exporter.build("symroot")[1].decode()
+assert "SECRET" not in _doc and "<title>symroot</title>" in _doc, "symlinked root title leaked"
 r = c.get("/api/export?path=exp&subpages=1")
 assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment"), r.headers
 assert r.headers["content-security-policy"] == "sandbox" and r.headers["x-qillqa-offline"] == "yes"

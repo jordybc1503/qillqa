@@ -327,10 +327,13 @@ try:
         # an html page: unquoted src, a stylesheet with url(), a page link with no target, an anchor
         (tmp / "share" / "sub" / "app").mkdir()
         (tmp / "share" / "sub" / "app" / "dot.png").write_bytes(dot)
-        (tmp / "share" / "sub" / "app" / "style.css").write_text("#bg{width:10px;height:10px;background:url(dot.png)}")
+        (tmp / "share" / "sub" / "app" / "style.css").write_text(  # imports a sheet that sorts after it
+            '@import "z.css";\n#bg{width:10px;height:10px;background:url(dot.png)}')
+        (tmp / "share" / "sub" / "app" / "z.css").write_text("#bg2{width:10px;height:10px;background:url( 'dot.png' )}")
         (tmp / "share" / "sub" / "app" / "index.html").write_text(
             "<!doctype html><html><head><title>App</title><link rel=stylesheet href=style.css></head><body>"
-            '<img id=u src=dot.png><div id=bg></div><a id=back href="/#share">back</a> <a id=jump href="#far">jump</a>'
+            '<img id=u src=dot.png><div id=bg></div><div id=bg2></div><a id=back href="/#share">back</a> '
+            '<a id=jump href="#far">jump</a><script>window.S="<img src=dot.png>"</script>'
             '<h2 id=far style="margin-top:3000px">Far</h2></body></html>')
         got = pg.request.get(base + "/api/export?path=share&subpages=1")
         assert got.ok and got.headers["content-disposition"].startswith("attachment"), got.headers
@@ -355,6 +358,8 @@ try:
         view.locator("#u").wait_for(timeout=10000)
         assert view.locator("#u").evaluate("i=>i.decode().then(()=>i.naturalWidth)") == 1, "unquoted src"
         assert "blob:" in view.locator("#bg").evaluate("e=>getComputedStyle(e).backgroundImage"), "css url()"
+        assert "blob:" in view.locator("#bg2").evaluate("e=>getComputedStyle(e).backgroundImage"), "css @import order"
+        assert view.locator("#u").evaluate("()=>window.S") == "<img src=dot.png>", "script text was rewritten"
         view.locator("#jump").click()
         off.wait_for_timeout(300)
         assert off.locator("#list a.on").inner_text() == "App", "an #anchor left the page"

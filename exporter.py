@@ -26,6 +26,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 
 from server import INDEX_NAMES, PAGES, VAR, _index, _rel, _safe, _title
@@ -38,11 +39,99 @@ for ext, mime in ((".glb", "model/gltf-binary"), (".gltf", "model/gltf+json"), (
                   (".hdr", "image/vnd.radiance"), (".md", "text/markdown")):
     mimetypes.add_type(mime, ext)
 
-# import/export specifiers in JS: from '…', import '…', import('…')
+# import/export specifiers in JS: from '…', import '…', import('…') — only where the keyword is code
 _IMPORT = re.compile(r"""(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2""")
-_MODULE = re.compile(r"""<script\b(?=[^>]*\btype\s*=\s*["']?module)[^>]*>(.*?)</script>""", re.I | re.S)
-_IMPORTMAP = re.compile(r"""<script\b[^>]*\btype\s*=\s*["']?importmap["']?[^>]*>(.*?)</script>""", re.I | re.S)
-_SCRIPT_SRC = re.compile(r"""(<script\b[^>]*?\bsrc\s*=\s*["']?([^"'\s>]+)[^>]*>)""", re.I)
+_META_URL = re.compile(r"""(?<![\w$.])import\.meta\.url(?![\w$])""")
+_REGEX_BEFORE = set("(,=:[!&|?{};+-*%~^<>") | {""}
+_REGEX_KEYWORDS = {"return", "typeof", "case", "do", "else", "in", "of", "void", "yield", "await", "delete", "new", "throw"}
+
+
+def _code_mask(src: str) -> bytearray:
+    """1 where src is JS code, 0 inside strings, template text, comments and regex literals,
+    so rewriting never touches text that only looks like code."""
+    mask, n, i, prev, word, tmpl = bytearray(len(src)), len(src), 0, "", "", []  # tmpl: brace depth per ${
+
+    def skip_quoted(j, q):
+        j += 1
+        while j < n and src[j] != q and src[j] != "\n":
+            j += 2 if src[j] == "\\" else 1
+        return j + 1
+
+    def skip_template(j):  # j just after a backtick or a closing } of ${…}; returns index after the end
+        while j < n:
+            if src[j] == "\\":
+                j += 2
+            elif src[j] == "`":
+                return j + 1, False
+            elif src.startswith("${", j):
+                return j + 2, True
+            else:
+                j += 1
+        return n, False
+
+    while i < n:
+        c = src[i]
+        if c in "'\"":
+            i, prev, word = skip_quoted(i, c), "x", ""
+        elif c == "`":
+            i, into = skip_template(i + 1)
+            if into:
+                tmpl.append(0)
+            prev, word = "x", ""
+        elif src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+        elif src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif c == "/" and (prev in _REGEX_BEFORE or word in _REGEX_KEYWORDS):
+            j, cls = i + 1, False  # regex literal
+            while j < n and src[j] != "\n" and (src[j] != "/" or cls):
+                if src[j] == "\\":
+                    j += 1
+                elif src[j] == "[":
+                    cls = True
+                elif src[j] == "]":
+                    cls = False
+                j += 1
+            i, prev, word = j + 1, "x", ""
+        elif c == "}" and tmpl and tmpl[-1] == 0:
+            tmpl.pop()
+            i, into = skip_template(i + 1)
+            if into:
+                tmpl.append(0)
+            prev, word = "x", ""
+        else:
+            if tmpl and c in "{}":
+                tmpl[-1] += 1 if c == "{" else -1
+            mask[i] = 1
+            if not c.isspace():
+                word = word + c if (c.isalnum() or c in "_$") else ""
+                prev = "x" if (c.isalnum() or c in "_$)]") else c
+            i += 1
+    return mask
+
+
+class _Scripts(HTMLParser):
+    """Every <script> of a page with its real attributes (a data-src is not a src)."""
+    def __init__(self, text: str):
+        super().__init__(convert_charrefs=True)
+        self.tags, self._cur = [], None
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            a = {k.lower(): v or "" for k, v in attrs}
+            self._cur = {"src": a.get("src", "").strip(), "type": a.get("type", "").strip().lower(), "body": ""}
+            self.tags.append(self._cur)
+
+    def handle_data(self, data):
+        if self._cur is not None:
+            self._cur["body"] += data
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self._cur = None
 
 
 def _inside(p: Path) -> bool:
@@ -133,15 +222,16 @@ def _resolve(spec: str, base: str, imap: dict) -> str | None:
 def _rewrite_js(src: str, url: str) -> str:
     """A module will run from a blob: URL, so its relative specifiers and import.meta.url must
     be made absolute first (the import map then sends those absolute URLs to blobs)."""
+    code = _code_mask(src)
+
     def fix(m):
         spec = m.group(3)
-        if spec.startswith(("./", "../", "/")):
+        if code[m.start()] and spec.startswith(("./", "../", "/")):
             return f"{m.group(1)}{m.group(2)}{urllib.parse.urljoin(url, spec)}{m.group(2)}"
         return m.group(0)
-    return _META_URL.sub(json.dumps(url), _IMPORT.sub(fix, src))
-
-
-_META_URL = re.compile(r"""(?<!["'`\w.$])import\.meta\.url(?![\w$"'`])""")  # not inside a string
+    src = _IMPORT.sub(fix, src)
+    code = _code_mask(src)  # offsets moved
+    return _META_URL.sub(lambda m: json.dumps(url) if code[m.start()] else m.group(0), src)
 
 
 class _Bundle:
@@ -172,7 +262,10 @@ class _Bundle:
         self.cdn[url] = self.add(_rewrite_js(src, url).encode(), "text/javascript")
 
     def _scan(self, src: str, base: str, imap: dict, imports: dict, seen: set) -> None:
+        code = _code_mask(src)
         for m in _IMPORT.finditer(src):
+            if not code[m.start()]:
+                continue  # an example in a comment or a string
             spec = m.group(3)
             url = _resolve(spec, base, imap)
             if not url:
@@ -197,7 +290,8 @@ def build(path: str, subpages: bool = False) -> tuple[str, bytes, dict]:
         rel = _rel(page)
         base = BASE + urllib.parse.quote(rel) + "/"
         page_html = _page_html(page)
-        maps = [json.loads(m) for m in _IMPORTMAP.findall(page_html) if m.strip()]
+        scripts = _Scripts(page_html).tags
+        maps = [json.loads(s["body"]) for s in scripts if s["type"] == "importmap" and s["body"].strip()]
         # import-map targets resolve against the document, not against the importing module
         imap = {k: urllib.parse.urljoin(base, v) for m in maps for k, v in m.get("imports", {}).items()}
         imports: dict[str, str] = {}
@@ -213,13 +307,15 @@ def build(path: str, subpages: bool = False) -> tuple[str, bytes, dict]:
                 data = _rewrite_js(src, url).encode()
             files[url] = b.add(data, mime)
             sizes.append((f"{rel}/{f.relative_to(page).as_posix()}", len(data)))
-        for body in _MODULE.findall(page_html):
-            b._scan(body, base, imap, imports, seen)
-        for tag, src in _SCRIPT_SRC.findall(page_html):  # CDN <script src>: modules keep their imports
-            url = urllib.parse.urljoin(base, src)
+        for s in scripts:
+            if s["type"] == "module" and not s["src"]:
+                b._scan(s["body"], base, imap, imports, seen)
+            if not s["src"]:
+                continue
+            url = urllib.parse.urljoin(base, s["src"])  # CDN <script src>: modules keep their imports
             if not url.startswith(("http://", "https://")) or url.startswith(BASE) or url in b.cdn:
                 continue
-            if re.search(r"""\btype\s*=\s*["']?module""", tag, re.I):
+            if s["type"] == "module":
                 b.module(url, imap, imports, seen)
             else:
                 data = _fetch(url)
@@ -233,7 +329,8 @@ def build(path: str, subpages: bool = False) -> tuple[str, bytes, dict]:
                           "html": b.add(page_html.encode(), "text/html"), "files": files, "imports": imports,
                           "depth": len(page.relative_to(root).parts)})
     name = (root.name or "qillqa") + ".html"
-    doc = _document(_title(root) if _index(root) else root.name, out_pages, b)
+    own = _index(root) and _inside(_index(root))  # a symlinked index outside the notebook is never read
+    doc = _document(_title(root) if own else root.name, out_pages, b)
     total = len(doc)
     report = {"file": name, "bytes": total, "pages": [p["path"] for p in out_pages],
               "offline": not b.missing, "needs_internet_for": sorted(set(b.missing)),
@@ -286,9 +383,15 @@ for(const[C,p]of[['HTMLImageElement','src'],['HTMLMediaElement','src'],['HTMLSou
   const P=window[C]&&window[C].prototype,d=P&&Object.getOwnPropertyDescriptor(P,p);if(!d||!d.set)continue;
   Object.defineProperty(P,p,{...d,set(v){d.set.call(this,r(v)||v)}})}
 const S=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){return S.call(this,n,/^(src|href|poster|data)$/i.test(n)?(r(v)||v):v)};
-const fix=s=>typeof s!=='string'?s:s.replace(/(\s(?:src|href|poster|data)\s*=\s*)(?:(["'])([^"']*)\2|([^\s"'>]+))/gi,(m,a,q,v,u)=>{
-    const b=r(q?v:u);return b?a+(q||'"')+b+(q||'"'):m})
-  .replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=r(v);return b?'url('+q+b+q+')':m});
+const cssR=s=>s.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=r(v);return b?'url('+q+b+q+')':m});
+const H=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML');
+const fix=s=>{if(typeof s!=='string'||!/src|href|poster|data|url\(/i.test(s))return s;  // parse, never regex the markup
+  const t=document.createElement('template');H.set.call(t,s);
+  for(const el of t.content.querySelectorAll('[src],[href],[poster],[data]'))for(const n of['src','href','poster','data']){
+    const v=el.getAttribute(n),b=v!=null&&r(v);if(b)S.call(el,n,b)}
+  for(const el of t.content.querySelectorAll('style'))el.textContent=cssR(el.textContent);
+  for(const el of t.content.querySelectorAll('[style]'))S.call(el,'style',cssR(el.getAttribute('style')));
+  return H.get.call(t)};
 for(const p of['innerHTML','outerHTML']){const d=Object.getOwnPropertyDescriptor(Element.prototype,p);
   Object.defineProperty(Element.prototype,p,{...d,set(v){d.set.call(this,fix(v))}})}
 const I=Element.prototype.insertAdjacentHTML;Element.prototype.insertAdjacentHTML=function(w,s){return I.call(this,w,fix(s))};
@@ -306,21 +409,31 @@ async function open(path){
   const cssFix=(t,b)=>t.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const x=look(v,b);return x?'url('+q+x+q+')':m})
     .replace(/@import\s+(["'])([^"']+)\1/g,(m,q,v)=>{const x=look(v,b);return x?'@import '+q+x+q:m});
   await Promise.all(ids.map(async([u,id])=>{if(D.mime[id]==='text/css')css.push([u,id]);else map[u]=await url(id)}));
-  for(const[u,id]of css){const k=id+'@'+u;  // a stylesheet's url()/@import resolve against the stylesheet
-    if(!made[k])made[k]=text(id).then(t=>URL.createObjectURL(new Blob([cssFix(t,u)],{type:'text/css'})));map[u]=await made[k]}
+  const cssId=Object.fromEntries(css);  // stylesheets after their @import targets; url()/@import resolve against the sheet
+  async function sheet(u,seen){if(map[u]||seen.has(u))return;seen.add(u);const t=await text(cssId[u]);
+    for(const m of t.matchAll(/@import\s+(?:url\(\s*)?(["']?)([^"')\s;]+)\1/g)){
+      try{const x=new URL(m[2],u);x.hash='';x.search='';if(cssId[x.href])await sheet(x.href,seen)}catch(e){}}
+    const k=cssId[u]+'@'+u;if(!made[k])made[k]=URL.createObjectURL(new Blob([cssFix(t,u)],{type:'text/css'}));map[u]=made[k]}
+  for(const[u]of css)await sheet(u,new Set());
   const imports={};for(const[s,u]of Object.entries(p.imports))imports[s]=map[u]||u;
   for(const u in map)if(/\.m?js$/i.test(u)||u in D.cdn)imports[u]=map[u];
-  let h=(await text(p.html)).replace(/<script\b[^>]*\btype\s*=\s*["']?importmap["']?[^>]*>[\s\S]*?<\/script>/gi,'');
-  const here=location.href.split('#')[0];
-  h=h.replace(/(\s(?:src|href|poster|data)\s*=\s*)(?:(["'])([^"']*)\2|([^\s"'>]+))/gi,(m,a,q,v,u)=>{
-       const w=q?v:u,Q=q||'"',pl=p.md&&/href/i.test(a)&&w.match(/^\/#(.+)$/);  // md link to another notebook page
-       if(pl){const t=decodeURIComponent(pl[1]);return byPath[t]?a+Q+here+'#'+encodeURIComponent(t)+Q:a.replace(/href/i,'data-href')+Q+w+Q}
-       const b=look(w,p.base);return b?a+Q+b+Q:m})
-     .replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=look(v,p.base);return b?'url('+q+b+q+')':m});
-  // markdown pages: no scripts at all (as in qillqa), so no shim; their links were rewritten above
-  const head=p.md?'':'<base href="'+p.base+'"><script>window.__qx='+JSON.stringify(map).replace(/</g,'\\u003c')+';'+SHIM+'<\/script>'+
-    '<script type="importmap">'+JSON.stringify({imports}).replace(/</g,'\\u003c')+'<\/script>';
-  h=/<head[^>]*>/i.test(h)?h.replace(/<head[^>]*>/i,m=>m+head):head+h;
+  // parse the page and rewrite real attributes only (never script text or other attributes' values)
+  const doc=new DOMParser().parseFromString(await text(p.html),'text/html'),here=location.href.split('#')[0];
+  doc.querySelectorAll('script[type="importmap" i]').forEach(s=>s.remove());
+  for(const el of doc.querySelectorAll('[src],[href],[poster],[data]'))for(const n of['src','href','poster','data']){
+    const v=el.getAttribute(n);if(v==null)continue;
+    const pl=p.md&&n==='href'&&v.match(/^\/#(.+)$/);  // md link to another notebook page
+    if(pl){const t=decodeURIComponent(pl[1]);if(byPath[t])el.setAttribute('href',here+'#'+encodeURIComponent(t));
+      else{el.removeAttribute('href');el.setAttribute('data-href',v)}continue}
+    const b=look(v,p.base);if(b)el.setAttribute(n,b)}
+  for(const el of doc.querySelectorAll('style'))el.textContent=cssFix(el.textContent,p.base);
+  for(const el of doc.querySelectorAll('[style]'))el.setAttribute('style',cssFix(el.getAttribute('style'),p.base));
+  if(!p.md){  // markdown pages: no scripts at all (as in qillqa), so no shim
+    const base=doc.createElement('base'),shim=doc.createElement('script'),im=doc.createElement('script');base.href=p.base;
+    shim.textContent='window.__qx='+JSON.stringify(map).replace(/</g,'\\u003c')+';'+SHIM;
+    im.type='importmap';im.textContent=JSON.stringify({imports}).replace(/</g,'\\u003c');
+    doc.head.prepend(base,shim,im)}
+  const h='<!doctype html>'+doc.documentElement.outerHTML;
   const f=$('view');f.onload=()=>{$('wait').hidden=true};
   if(p.md)f.setAttribute('sandbox','allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation');
   else f.removeAttribute('sandbox');
