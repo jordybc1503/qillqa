@@ -328,12 +328,15 @@ try:
         (tmp / "share" / "sub" / "app").mkdir()
         (tmp / "share" / "sub" / "app" / "dot.png").write_bytes(dot)
         (tmp / "share" / "sub" / "app" / "style.css").write_text(  # imports a sheet that sorts after it
-            '@import "z.css";\n#bg{width:10px;height:10px;background:url(dot.png)}')
-        (tmp / "share" / "sub" / "app" / "z.css").write_text("#bg2{width:10px;height:10px;background:url( 'dot.png' )}")
+            '@import url("z theme.css") screen;\n#bg{width:10px;height:10px;background:url(dot.png)}')
+        (tmp / "share" / "sub" / "app" / "z theme.css").write_text(
+            "#bg2{width:10px;height:10px;background:url( 'dot.png' )}")
         (tmp / "share" / "sub" / "app" / "index.html").write_text(
             "<!doctype html><html><head><title>App</title><link rel=stylesheet href=style.css></head><body>"
             '<img id=u src=dot.png><div id=bg></div><div id=bg2></div><a id=back href="/#share">back</a> '
-            '<a id=jump href="#far">jump</a><script>window.S="<img src=dot.png>"</script>'
+            '<a id=jump href="#far">jump</a><template id=tp><img id=ti src=dot.png></template>'
+            '<script>window.S="<img src=dot.png>";document.body.append(tp.content.cloneNode(true));'
+            'const s2=document.createElement("script");s2.innerHTML=\'window.T="<img src=dot.png>"\';document.body.append(s2)</script>'
             '<h2 id=far style="margin-top:3000px">Far</h2></body></html>')
         got = pg.request.get(base + "/api/export?path=share&subpages=1")
         assert got.ok and got.headers["content-disposition"].startswith("attachment"), got.headers
@@ -360,6 +363,9 @@ try:
         assert "blob:" in view.locator("#bg").evaluate("e=>getComputedStyle(e).backgroundImage"), "css url()"
         assert "blob:" in view.locator("#bg2").evaluate("e=>getComputedStyle(e).backgroundImage"), "css @import order"
         assert view.locator("#u").evaluate("()=>window.S") == "<img src=dot.png>", "script text was rewritten"
+        assert view.locator("#u").evaluate("()=>window.T") == "<img src=dot.png>", "script.innerHTML was rewritten"
+        assert view.locator("#ti").evaluate("i=>i.decode().then(()=>i.naturalWidth)") == 1, "template content"
+        assert view.locator("#u").evaluate("()=>document.compatMode") == "CSS1Compat", "doctype kept"
         view.locator("#jump").click()
         off.wait_for_timeout(300)
         assert off.locator("#list a.on").inner_text() == "App", "an #anchor left the page"

@@ -488,6 +488,9 @@ for _src, _want in {
     "// import x from './c.js'\nimport y from './d.js';": "// import x from './c.js'\nimport y from 'https://cdn.jsdelivr.net/p/d.js';",
     "const r=/['\"]/g; import z from './e.js';": "const r=/['\"]/g; import z from 'https://cdn.jsdelivr.net/p/e.js';",
     "a = b / c; const u=import.meta.url;": 'a = b / c; const u="%s";' % _U,
+    'i++ / 2; const s="v import.meta.url";': 'i++ / 2; const s="v import.meta.url";',
+    'o.return / 2; const s="v import.meta.url";': 'o.return / 2; const s="v import.meta.url";',
+    "const k=`${/'/.test(a)}`; const u=import.meta.url;": 'const k=`${/\'/.test(a)}`; const u="%s";' % _U,
 }.items():
     assert exporter._rewrite_js(_src, _U) == _want, (_src, exporter._rewrite_js(_src, _U))
 # Codex r2: a data-src is not the src; a symlinked root index never gives its title

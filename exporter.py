@@ -50,6 +50,7 @@ def _code_mask(src: str) -> bytearray:
     """1 where src is JS code, 0 inside strings, template text, comments and regex literals,
     so rewriting never touches text that only looks like code."""
     mask, n, i, prev, word, tmpl = bytearray(len(src)), len(src), 0, "", "", []  # tmpl: brace depth per ${
+    last, dotted = "", False  # last code char; the current word follows a '.' (obj.return is no keyword)
 
     def skip_quoted(j, q):
         j += 1
@@ -77,14 +78,14 @@ def _code_mask(src: str) -> bytearray:
             i, into = skip_template(i + 1)
             if into:
                 tmpl.append(0)
-            prev, word = "x", ""
+            prev, word = ("{" if into else "x"), ""  # a ${ starts an expression: a regex may follow
         elif src.startswith("//", i):
             j = src.find("\n", i)
             i = n if j < 0 else j
         elif src.startswith("/*", i):
             j = src.find("*/", i + 2)
             i = n if j < 0 else j + 2
-        elif c == "/" and (prev in _REGEX_BEFORE or word in _REGEX_KEYWORDS):
+        elif c == "/" and (prev in _REGEX_BEFORE or (word in _REGEX_KEYWORDS and not dotted)):
             j, cls = i + 1, False  # regex literal
             while j < n and src[j] != "\n" and (src[j] != "/" or cls):
                 if src[j] == "\\":
@@ -100,14 +101,20 @@ def _code_mask(src: str) -> bytearray:
             i, into = skip_template(i + 1)
             if into:
                 tmpl.append(0)
-            prev, word = "x", ""
+            prev, word = ("{" if into else "x"), ""
         else:
             if tmpl and c in "{}":
                 tmpl[-1] += 1 if c == "{" else -1
             mask[i] = 1
             if not c.isspace():
-                word = word + c if (c.isalnum() or c in "_$") else ""
-                prev = "x" if (c.isalnum() or c in "_$)]") else c
+                ident = c.isalnum() or c in "_$"
+                if ident and not word:
+                    dotted = last == "."
+                word = word + c if ident else ""
+                if c in "+-" and last == c:  # a++ / b: after a postfix ++/-- a slash divides
+                    prev, last = "x", ""
+                else:
+                    prev, last = ("x" if (ident or c in ")]") else c), c
             i += 1
     return mask
 
@@ -385,15 +392,18 @@ for(const[C,p]of[['HTMLImageElement','src'],['HTMLMediaElement','src'],['HTMLSou
 const S=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){return S.call(this,n,/^(src|href|poster|data)$/i.test(n)?(r(v)||v):v)};
 const cssR=s=>s.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/g,(m,q,v)=>{const b=r(v);return b?'url('+q+b+q+')':m});
 const H=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML');
+const all=(root,sel)=>{const o=[...root.querySelectorAll(sel)];for(const t of root.querySelectorAll('template'))o.push(...all(t.content,sel));return o};
 const fix=s=>{if(typeof s!=='string'||!/src|href|poster|data|url\(/i.test(s))return s;  // parse, never regex the markup
   const t=document.createElement('template');H.set.call(t,s);
-  for(const el of t.content.querySelectorAll('[src],[href],[poster],[data]'))for(const n of['src','href','poster','data']){
+  for(const el of all(t.content,'[src],[href],[poster],[data]'))for(const n of['src','href','poster','data']){
     const v=el.getAttribute(n),b=v!=null&&r(v);if(b)S.call(el,n,b)}
-  for(const el of t.content.querySelectorAll('style'))el.textContent=cssR(el.textContent);
-  for(const el of t.content.querySelectorAll('[style]'))S.call(el,'style',cssR(el.getAttribute('style')));
+  for(const el of all(t.content,'style'))el.textContent=cssR(el.textContent);
+  for(const el of all(t.content,'[style]'))S.call(el,'style',cssR(el.getAttribute('style')));
   return H.get.call(t)};
+const RAW=/^(SCRIPT|TEXTAREA|TITLE|XMP|NOEMBED|NOFRAMES|PLAINTEXT)$/;  // their innerHTML is text, not markup
 for(const p of['innerHTML','outerHTML']){const d=Object.getOwnPropertyDescriptor(Element.prototype,p);
-  Object.defineProperty(Element.prototype,p,{...d,set(v){d.set.call(this,fix(v))}})}
+  Object.defineProperty(Element.prototype,p,{...d,set(v){const own=p==='innerHTML';
+    d.set.call(this,own&&RAW.test(this.tagName)?v:own&&this.tagName==='STYLE'?cssR(String(v)):fix(v))}})}
 const I=Element.prototype.insertAdjacentHTML;Element.prototype.insertAdjacentHTML=function(w,s){return I.call(this,w,fix(s))};
 document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('a[href]');if(!a)return;
   const h=a.getAttribute('href')||'',m=h.match(/^\/#(.+)$/);  // /#page = another notebook page
@@ -410,30 +420,36 @@ async function open(path){
     .replace(/@import\s+(["'])([^"']+)\1/g,(m,q,v)=>{const x=look(v,b);return x?'@import '+q+x+q:m});
   await Promise.all(ids.map(async([u,id])=>{if(D.mime[id]==='text/css')css.push([u,id]);else map[u]=await url(id)}));
   const cssId=Object.fromEntries(css);  // stylesheets after their @import targets; url()/@import resolve against the sheet
+  const cycle=new Set();
   async function sheet(u,seen){if(map[u]||seen.has(u))return;seen.add(u);const t=await text(cssId[u]);
-    for(const m of t.matchAll(/@import\s+(?:url\(\s*)?(["']?)([^"')\s;]+)\1/g)){
-      try{const x=new URL(m[2],u);x.hash='';x.search='';if(cssId[x.href])await sheet(x.href,seen)}catch(e){}}
+    for(const m of t.matchAll(/@import\s+(?:url\(\s*)?(?:(["'])(.*?)\1|([^"')\s;]+))/g)){
+      try{const x=new URL(m[2]??m[3],u);x.hash='';x.search='';
+        if(cssId[x.href]){await sheet(x.href,seen);if(!map[x.href])cycle.add(u)}}catch(e){}}
     const k=cssId[u]+'@'+u;if(!made[k])made[k]=URL.createObjectURL(new Blob([cssFix(t,u)],{type:'text/css'}));map[u]=made[k]}
   for(const[u]of css)await sheet(u,new Set());
+  for(const u of cycle)map[u]=URL.createObjectURL(new Blob([cssFix(await text(cssId[u]),u)],{type:'text/css'}));  // a.css <-> z.css
   const imports={};for(const[s,u]of Object.entries(p.imports))imports[s]=map[u]||u;
   for(const u in map)if(/\.m?js$/i.test(u)||u in D.cdn)imports[u]=map[u];
   // parse the page and rewrite real attributes only (never script text or other attributes' values)
   const doc=new DOMParser().parseFromString(await text(p.html),'text/html'),here=location.href.split('#')[0];
   doc.querySelectorAll('script[type="importmap" i]').forEach(s=>s.remove());
-  for(const el of doc.querySelectorAll('[src],[href],[poster],[data]'))for(const n of['src','href','poster','data']){
+  const all=(root,sel)=>{const o=[...root.querySelectorAll(sel)];for(const t of root.querySelectorAll('template'))o.push(...all(t.content,sel));return o};
+  for(const el of all(doc,'[src],[href],[poster],[data]'))for(const n of['src','href','poster','data']){
     const v=el.getAttribute(n);if(v==null)continue;
     const pl=p.md&&n==='href'&&v.match(/^\/#(.+)$/);  // md link to another notebook page
     if(pl){const t=decodeURIComponent(pl[1]);if(byPath[t])el.setAttribute('href',here+'#'+encodeURIComponent(t));
       else{el.removeAttribute('href');el.setAttribute('data-href',v)}continue}
     const b=look(v,p.base);if(b)el.setAttribute(n,b)}
-  for(const el of doc.querySelectorAll('style'))el.textContent=cssFix(el.textContent,p.base);
-  for(const el of doc.querySelectorAll('[style]'))el.setAttribute('style',cssFix(el.getAttribute('style'),p.base));
+  for(const el of all(doc,'style'))el.textContent=cssFix(el.textContent,p.base);
+  for(const el of all(doc,'[style]'))el.setAttribute('style',cssFix(el.getAttribute('style'),p.base));
   if(!p.md){  // markdown pages: no scripts at all (as in qillqa), so no shim
     const base=doc.createElement('base'),shim=doc.createElement('script'),im=doc.createElement('script');base.href=p.base;
     shim.textContent='window.__qx='+JSON.stringify(map).replace(/</g,'\\u003c')+';'+SHIM;
     im.type='importmap';im.textContent=JSON.stringify({imports}).replace(/</g,'\\u003c');
     doc.head.prepend(base,shim,im)}
-  const h='<!doctype html>'+doc.documentElement.outerHTML;
+  const t=doc.doctype,dt=t?'<!DOCTYPE '+t.name+(t.publicId?' PUBLIC "'+t.publicId+'"':'')+  // no doctype = quirks, as before
+    (t.systemId?(t.publicId?'':' SYSTEM')+' "'+t.systemId+'"':'')+'>':'';
+  const h=dt+doc.documentElement.outerHTML;
   const f=$('view');f.onload=()=>{$('wait').hidden=true};
   if(p.md)f.setAttribute('sandbox','allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation');
   else f.removeAttribute('sandbox');
