@@ -950,7 +950,8 @@ function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'
   // export: one .html that opens on any device, offline (a folder with no page exports what is under it)
   const n=p&&nodeAt(nodes,p),ex=(t,sub)=>mk('a',{className:'exp',download:'',textContent:t,
     href:'/api/export?path='+encodeURIComponent(p)+(sub?'&subpages=1':''),title:'Download one .html file that opens on any device, even offline'});
-  if(n)out.push(mk('span',{className:'exps'},ex('⤓ Export',0),...(n.children.length&&!document.querySelector('nav a.sec[data-path="'+CSS.escape(p)+'"]')?[ex('⤓ + subpages',1)]:[])));
+  const below=x=>x.children.some(c=>c.page||below(c));  // a real page below (an assets/ folder is not one)
+  if(n)out.push(mk('span',{className:'exps'},ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
   $('#crumb').replaceChildren(...out)}
 let scope='';
 async function show(){
