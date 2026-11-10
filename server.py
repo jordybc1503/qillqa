@@ -16,11 +16,14 @@ import base64
 import contextlib
 import fcntl
 import functools
+import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import time
 import urllib.parse
@@ -194,6 +197,96 @@ def _delete(path: str, recursive: bool = False) -> dict:
     return {"deleted": _rel(d)}
 
 
+# ---------------------------------------------------------------- share links
+# A share link opens ONE page (and, if asked, its subpages) read-only, without the
+# token, until it expires or is revoked. The link is /s/<id>.<mac>: mac = HMAC of
+# the id with QILLQA_TOKEN, so the secret part is never stored (var/shares.db only
+# keeps the id) and the owner can copy the link again. Rotating QILLQA_TOKEN kills
+# every link. The web server checks expiry on EVERY request (the page and its files).
+
+SHARES_DB = VAR / "shares.db"
+SHARE_MAX_HOURS = 90 * 24
+PUBLIC_URL = os.environ.get("QILLQA_PUBLIC_URL", "").rstrip("/") or URL
+_SHARE_ID = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _shares_db() -> sqlite3.Connection:
+    VAR.mkdir(exist_ok=True)
+    c = sqlite3.connect(SHARES_DB, timeout=10)
+    c.row_factory = sqlite3.Row
+    c.execute("""create table if not exists shares(id text primary key, path text not null,
+                 subpages integer not null, label text not null default '', created real not null,
+                 expires real not null, revoked real, uses integer not null default 0, last_used real)""")
+    return c
+
+
+def _share_mac(sid: str) -> str:
+    return hmac.new(TOKEN.encode(), b"share:" + sid.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def share_token(sid: str) -> str:
+    return f"{sid}.{_share_mac(sid)}"
+
+
+def _share_out(r: sqlite3.Row, base: str = "") -> dict:
+    now = time.time()
+    state = "revoked" if r["revoked"] else "expired" if r["expires"] <= now else "active"
+    return {"id": r["id"], "path": r["path"], "subpages": bool(r["subpages"]), "label": r["label"],
+            "created": int(r["created"]), "expires": int(r["expires"]), "state": state,
+            "uses": r["uses"], "last_used": int(r["last_used"]) if r["last_used"] else None,
+            "token": share_token(r["id"]), "url": f"{base or PUBLIC_URL}/s/{share_token(r['id'])}"}
+
+
+def share_create(path: str, hours: float = 168, subpages: bool = False, label: str = "",
+                 base: str = "") -> dict:
+    if not TOKEN:
+        raise RuntimeError("QILLQA_TOKEN is empty in .env")
+    d = _safe(path)
+    if d == PAGES or not _index(d):
+        raise ValueError(f"no page at {path!r}")
+    hours = float(hours)
+    if not 0 < hours <= SHARE_MAX_HOURS:
+        raise ValueError(f"hours must be between 0 and {SHARE_MAX_HOURS}")
+    label = " ".join(str(label or "").split())[:120]
+    sid, now = os.urandom(8).hex(), time.time()
+    with contextlib.closing(_shares_db()) as c, c:
+        c.execute("insert into shares(id,path,subpages,label,created,expires) values(?,?,?,?,?,?)",
+                  (sid, _rel(d), int(bool(subpages)), label, now, now + hours * 3600))
+        return _share_out(c.execute("select * from shares where id=?", (sid,)).fetchone(), base)
+
+
+def share_list(path: str = "", base: str = "") -> list[dict]:
+    """Links of `path` (exact page) or all; expired/revoked kept 30 days for the record."""
+    with contextlib.closing(_shares_db()) as c, c:
+        c.execute("delete from shares where coalesce(revoked, expires) < ?", (time.time() - 30 * 86400,))
+        rows = (c.execute("select * from shares where path=? order by created desc", (_rel(_safe(path)),))
+                if path else c.execute("select * from shares order by created desc"))
+        return [_share_out(r, base) for r in rows]
+
+
+def share_revoke(sid: str) -> dict:
+    with contextlib.closing(_shares_db()) as c, c:
+        n = c.execute("update shares set revoked=? where id=? and revoked is null", (time.time(), sid)).rowcount
+        r = c.execute("select * from shares where id=?", (sid,)).fetchone()
+    if not r:
+        raise ValueError(f"no share link {sid!r}")
+    return {**_share_out(r), "changed": bool(n)}
+
+
+def share_resolve(token: str, count: bool = False) -> dict | None:
+    """The live share behind a token, or None (bad mac, unknown, expired, revoked)."""
+    sid, _, mac = (token or "").partition(".")
+    if not TOKEN or not _SHARE_ID.match(sid) or not hmac.compare_digest(mac.encode(), _share_mac(sid).encode()):
+        return None
+    with contextlib.closing(_shares_db()) as c, c:
+        r = c.execute("select * from shares where id=?", (sid,)).fetchone()
+        if not r or r["revoked"] or r["expires"] <= time.time():
+            return None
+        if count:
+            c.execute("update shares set uses=uses+1, last_used=? where id=?", (time.time(), sid))
+        return dict(r)
+
+
 # ---------------------------------------------------------------- server
 
 def _health() -> bool:
@@ -349,6 +442,37 @@ def move_page(src: str, dst: str) -> str:
 def delete_page(path: str, recursive: bool = False) -> str:
     """Delete a qillqa page. If it has subpages, recursive=True is required."""
     return _write(_delete, path, recursive)
+
+
+def _share(path: str, hours: float, subpages: bool, label: str) -> dict:
+    out = share_create(path, hours, subpages, label)
+    start()  # the link only works while the web server runs
+    return out
+
+
+@mcp.tool()
+def share_page(path: str, hours: float = 168, subpages: bool = False, label: str = "") -> str:
+    """Create a temporary read-only link to one qillqa page (a "magic link"):
+    whoever has the URL can open that page, without the token, until it
+    expires (`hours`, default 168 = 7 days, max 2160 = 90 days) or is revoked
+    with revoke_share. subpages=True also opens the pages under it. `label`
+    says who it is for. Returns the URL (built from QILLQA_PUBLIC_URL, e.g. the
+    Tailscale address; people outside this machine need a reachable address)."""
+    return _dump(_share, path, hours, subpages, label)
+
+
+@mcp.tool()
+def list_shares(path: str = "") -> str:
+    """Share links of one page (`path`) or of the whole notebook, with their
+    state (active / expired / revoked), expiry, uses and URL."""
+    return _dump(share_list, path)
+
+
+@mcp.tool()
+def revoke_share(id: str) -> str:
+    """Revoke a share link by its id (from share_page or list_shares): it stops
+    working at once, also for pages already open."""
+    return _dump(share_revoke, id)
 
 
 # ---------------------------------------------------------------- preview

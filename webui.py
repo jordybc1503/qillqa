@@ -227,7 +227,7 @@ def _authed(req: Request) -> bool:
 
 @app.middleware("http")
 async def gate(req: Request, call_next):
-    if req.url.path in ("/health", "/login") or req.url.path.startswith("/f/") or _authed(req):
+    if req.url.path in ("/health", "/login") or req.url.path.startswith(("/f/", "/s/")) or _authed(req):
         return await call_next(req)
     if req.url.path.startswith(("/api/", "/view")):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -801,6 +801,12 @@ def signed_file(sig: str, rest: str, req: Request):
         _bad(e)
     if scope is None or (target != scope.resolve() and scope.resolve() not in target.parents):
         _bad(ValueError("invalid signature"))
+    return _serve(target, req)
+
+
+def _serve(target: Path, req: Request, live: bool = True):
+    """A page folder (rendered, sandboxed) or one of its files. live=False: read-only
+    (no checklist capability), for share links."""
     if target.is_dir():
         if not req.url.path.endswith("/"):  # relative links need the trailing slash
             return RedirectResponse(req.url.path + "/", status_code=307)
@@ -810,7 +816,7 @@ def signed_file(sig: str, rest: str, req: Request):
         text = _read_raw(idx)
         if idx.suffix == ".html":
             body, csp = text, _HTML_SANDBOX
-        elif _kinds(text):  # checklist: only our nonce'd script runs, never raw <script> in the md
+        elif live and _kinds(text):  # checklist: only our nonce'd script runs, never raw <script> in the md
             nonce, cap = secrets.token_urlsafe(16), _grant(_rel(target), _version(text))
             body, csp = (_render_md(_title(target), text, cap, nonce, _theme(req)),
                          f"{_MD_LIVE_SANDBOX}; script-src 'nonce-{nonce}'")
@@ -823,12 +829,140 @@ def signed_file(sig: str, rest: str, req: Request):
     # The page runs at an opaque origin, so its own .glb/.json (fetch) and its images and
     # videos used as WebGL textures are cross-origin reads. The signed URL is already the
     # capability (anyone holding it can GET the bytes); CORS only lets the page's JS read them.
-    r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private",
+    r = FileResponse(target, headers={**_SAFE_HEADERS, "Cache-Control": "private" if live else "no-store",
                                       "Access-Control-Allow-Origin": "*"})
     if r.media_type != "application/pdf":  # Chrome refuses to render PDFs in a sandbox
         r.headers["Content-Security-Policy"] = (_HTML_SANDBOX if r.media_type.startswith("text/html")
                                                  else "sandbox")
     return r
+
+
+
+# ---------------------------------------------------------------- share links
+# /s/<token>            a minimal read-only viewer (no tree, search, edit, export)
+# /s/<token>/p/<page>/  the page and its files, checked against the link on EVERY request
+# The token is checked (expiry, revocation) for the page and for each of its files, so a
+# link stops working at once; nothing here ever returns a permanent /f/ signature.
+
+_GONE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Enlace no disponible</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;background:#f4f6fb;color:#1d2433}
+div{max-width:380px;padding:28px;background:#fff;border-radius:14px;text-align:center}</style>
+<div><h1 style="font-size:1.3em">Este enlace ya no está disponible</h1><p>Caducó o fue revocado. Pide un enlace nuevo a quien te lo compartió.</p></div>"""
+_SHARE_HEADERS = {**_SAFE_HEADERS, "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"}
+
+
+def _in_share(share: dict, target: Path) -> bool:
+    """Inside the shared page; without subpages, no folder below it that is a page."""
+    scope = _safe(share["path"])
+    if target != scope and scope not in target.parents:
+        return False
+    if share["subpages"]:
+        return True
+    d = target if target.is_dir() else target.parent
+    while d != scope:
+        if _index(d):
+            return False
+        d = d.parent
+    return True
+
+
+@app.get("/s/{token}")
+def share_view(token: str, req: Request):
+    share = server.share_resolve(token, count=True)
+    if not share:
+        return HTMLResponse(_GONE, status_code=410, headers=_SHARE_HEADERS)
+    scope = _safe(share["path"])
+    if not _index(scope):
+        return HTMLResponse(_GONE, status_code=410, headers=_SHARE_HEADERS)
+    pages = [(share["path"], _title(scope), 0)]
+    if share["subpages"]:
+        def walk(nodes, depth):
+            for n in nodes:
+                if n["page"]:
+                    pages.append((n["path"], n["title"], depth))
+                walk(n["children"], depth + (1 if n["page"] else 0))
+        walk(tree(share["path"]), 1)
+    base = f"/s/{urllib.parse.quote(token)}/p/"
+    src = lambda rel: base + "".join(urllib.parse.quote(seg) + "/" for seg in rel.split("/"))
+    exp = time.strftime("%d/%m/%Y %H:%M", time.localtime(share["expires"]))
+    opts = "".join(f'<option value="{html.escape(src(p))}">{"· " * d}{html.escape(t)}</option>' for p, t, d in pages)
+    nav = (f'<select id="nav" aria-label="Página">{opts}</select>' if len(pages) > 1 else "")
+    nonce = secrets.token_urlsafe(16)
+    title = html.escape(pages[0][1])
+    body = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>{title}</title><style>
+html,body{{margin:0;height:100%;background:#f4f6fb;font:14px/1.4 system-ui,sans-serif;color:#1d2433}}
+body{{display:flex;flex-direction:column}}
+header{{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:8px 16px;background:#fff;border-bottom:1px solid #e2e6f0}}
+header b{{font-size:15px}} header span{{color:#5d6680;font-size:12.5px}}
+select{{font:inherit;padding:4px 8px;border:1px solid #e2e6f0;border-radius:7px;background:#fff;max-width:100%}}
+iframe{{flex:1;width:100%;border:0;background:#fff}}
+</style></head><body>
+<header><b>{title}</b><span>Solo lectura · el enlace caduca el {exp}</span>{nav}</header>
+<iframe id="pg" src="{html.escape(src(pages[0][0]))}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+<script nonce="{nonce}">const n=document.getElementById('nav');if(n)n.onchange=()=>document.getElementById('pg').src=n.value;</script>
+</body></html>"""
+    csp = (f"default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; frame-src 'self'; "
+           "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+    return HTMLResponse(body, headers={**_SHARE_HEADERS, "Content-Security-Policy": csp})
+
+
+@app.get("/s/{token}/p/{rest:path}")
+def share_file(token: str, rest: str, req: Request):
+    share = server.share_resolve(token)
+    if not share:
+        return HTMLResponse(_GONE, status_code=410, headers=_SHARE_HEADERS)
+    parts = [p for p in rest.split("/") if p]
+    if not parts or any(p == ".." or p.startswith(".") for p in parts):
+        _bad(ValueError("invalid path"))
+    try:
+        target = _safe(rest)
+    except ValueError as e:
+        _bad(e)
+    if not _in_share(share, target):
+        raise HTTPException(404, "not found")
+    r = _serve(target, req, live=False)
+    r.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return r
+
+
+def _origin(req: Request) -> str:
+    """Base for the link: QILLQA_PUBLIC_URL, else the address the owner is using."""
+    if os.environ.get("QILLQA_PUBLIC_URL"):
+        return server.PUBLIC_URL
+    proto = req.headers.get("x-forwarded-proto") or req.url.scheme
+    host = req.headers.get("host") or req.url.netloc
+    if host.endswith(".ts.net"):  # tailscale serve terminates TLS and forwards plain http
+        proto = "https"
+    return f"{proto}://{host}"
+
+
+@app.post("/api/share")
+async def api_share(req: Request):
+    b = await req.json()
+    try:
+        return server.share_create(str(b.get("path", "")), float(b.get("hours", 168)),
+                                   bool(b.get("subpages")), str(b.get("label", "")), _origin(req))
+    except (ValueError, TypeError) as e:
+        _bad(e)
+
+
+@app.get("/api/shares")
+def api_shares(req: Request, path: str = ""):
+    try:
+        return server.share_list(path, _origin(req))
+    except ValueError as e:
+        _bad(e)
+
+
+@app.post("/api/share/revoke")
+async def api_share_revoke(req: Request):
+    try:
+        return server.share_revoke(str((await req.json()).get("id", "")))
+    except ValueError as e:
+        _bad(e)
 
 
 CSS = """
@@ -917,6 +1051,16 @@ INDEX = """
 <textarea id="ed-text" spellcheck="false" aria-label="Page source"></textarea>
 <details id="ed-files" open><summary>Files in this page</summary><ul id="ed-list"></ul></details></div>
 <div id="cards" hidden><div class="cards-head"><h2 id="cards-title"></h2><label>Sort <select id="sort"><option value="date">Last changed</option><option value="name">Name</option></select></label></div><div id="cards-body"></div></div></section></main>
+<dialog id="share"><form method="dialog">
+<h3>Share <span id="sh-title"></span></h3>
+<p class="sh-note">Anyone with the link can open this page, read-only and without signing in, until it expires or you revoke it.</p>
+<label>Expires in <select id="sh-hours"><option value="1">1 hour</option><option value="24">24 hours</option><option value="168" selected>7 days</option><option value="720">30 days</option></select></label>
+<label id="sh-sub"><input type="checkbox" id="sh-subpages"> Include its subpages</label>
+<label>Label <input id="sh-label" maxlength="120" placeholder="Who is it for? (optional)"></label>
+<div class="sh-row"><button type="button" id="sh-create">Create link</button><button value="close" class="ghost">Close</button></div>
+<div id="sh-out" hidden><input id="sh-url" readonly aria-label="Share link"><button type="button" id="sh-copy">Copy</button></div>
+<small id="sh-msg"></small>
+<h4>Links of this page</h4><ul id="sh-list"></ul></form></dialog>
 <style>
 header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--card);
 border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),var(--c1)) 1}
@@ -985,6 +1129,16 @@ nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
 #edit{flex:1;display:flex;flex-direction:column;gap:8px;padding:4px 16px 16px;min-height:0}#edit[hidden]{display:none}
 .ed-bar{display:flex;align-items:center;gap:10px}.ed-bar b{overflow-wrap:anywhere}.ed-bar small{flex:1;color:var(--mute)}
 .ed-bar small.bad{color:var(--c2)}.ed-bar button{padding:6px 14px}button.ghost{background:var(--card);color:var(--fg);border:1px solid var(--line)}
+#share{border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--fg);padding:18px 20px;width:min(520px,calc(100vw - 32px))}
+#share::backdrop{background:color-mix(in srgb,var(--shadow) 45%,transparent)}
+#share [hidden]{display:none!important}#share form{display:grid;gap:10px}#share h3{margin:0}#share h4{margin:6px 0 0;font-size:.95em}
+#share label{display:grid;gap:4px;font-size:.9em;color:var(--mute)}#share label#sh-sub{display:flex;gap:8px;align-items:center}
+#share select,#share input{font:inherit;padding:7px 9px}.sh-note{margin:0;color:var(--mute);font-size:.85em}
+.sh-row,#sh-out{display:flex;gap:8px;flex-wrap:wrap}#sh-out input{flex:1;min-width:0}#sh-msg{color:var(--mute)}#sh-msg.bad{color:var(--c2)}
+#sh-list{list-style:none;margin:0;padding:0;display:grid;gap:6px;max-height:40vh;overflow:auto}
+#sh-list li{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 9px;border:1px solid var(--line);border-radius:9px;font-size:.88em}
+#sh-list li .who{flex:1;min-width:140px}#sh-list li small{color:var(--mute)}#sh-list li.off{opacity:.55}
+#sh-list button{padding:4px 10px;font-size:.9em}
 #ed-text{flex:1;min-height:40vh;width:100%;resize:vertical;padding:12px 14px;border:1px solid var(--line);border-radius:10px;
 background:var(--card);color:var(--fg);font:14px/1.55 ui-monospace,monospace;tab-size:2}#ed-text:focus{outline:2px solid var(--c3)}
 #ed-files{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px;max-height:30vh;overflow:auto}
@@ -1060,7 +1214,9 @@ function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'
   const below=x=>x.children.some(c=>c.page||below(c));  // a real page below (an assets/ folder is not one)
   const ed=n&&n.page?[mk('a',{className:'edl',href:'#'+p,textContent:editing?'👁 View':'✎ Edit',
     title:'Edit the page source and see the files in its folder',onclick:e=>{e.preventDefault();editing?closeEdit():openEdit(p)}})]:[];
-  if(n)out.push(mk('span',{className:'exps'},...ed,ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
+  const sh=n&&n.page?[mk('a',{className:'edl',href:'#'+p,textContent:'🔗 Share',
+    title:'Create a temporary read-only link to this page',onclick:e=>{e.preventDefault();openShare(p)}})]:[];
+  if(n)out.push(mk('span',{className:'exps'},...ed,...sh,ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
   $('#crumb').replaceChildren(...out)}
 // editor: raw index.md/html (saved with its version: 409 if the MCP or another tab changed it)
 let editing='',edVer='',edSaved='',edSeq=0,saving=-1;  // edSeq: a reply for an older open/save is ignored
@@ -1181,6 +1337,31 @@ const bar=on=>{document.body.classList.toggle('bar',on);$('#menu').textContent=o
 $('#menu').onclick=()=>bar(!document.body.classList.contains('bar'));
 addEventListener('hashchange',()=>bar(false));  // picked a page: back to reading
 $('#tree').addEventListener('click',e=>{if(e.target.closest('a'))bar(false)});  // ...also the one already open
+// share links: temporary read-only URL of one page (/s/<token>), revocable
+let shareP='';
+const hasSub=x=>x.children.some(c=>c.page||hasSub(c));
+const shMsg=t=>{t=t||'';$('#sh-msg').textContent=t;$('#sh-msg').classList.toggle('bad',t.startsWith('⚠'))};
+function openShare(p){const n=nodeAt(nodes,p);shareP=p;$('#sh-title').textContent=(n&&n.title)||p;
+  $('#sh-sub').hidden=!(n&&hasSub(n));$('#sh-subpages').checked=false;$('#sh-label').value='';$('#sh-out').hidden=true;shMsg('');
+  $('#share').showModal();listShares()}
+async function copyLink(url){try{await navigator.clipboard.writeText(url);shMsg('Link copied')}
+  catch(_){$('#sh-out').hidden=false;$('#sh-url').value=url;$('#sh-url').select();shMsg('Copy it with Ctrl+C')}}
+async function listShares(){const p=shareP,r=await fetch('/api/shares?path='+encodeURIComponent(p));if(p!==shareP)return;
+  const rows=r.ok?await r.json():[],when=t=>new Date(t*1000).toLocaleString([],{dateStyle:'medium',timeStyle:'short'});
+  $('#sh-list').replaceChildren(...(rows.length?rows.map(s=>{const on=s.state==='active';
+    return mk('li',{className:on?'':'off'},mk('span',{className:'who'},mk('b',{textContent:s.label||'(no label)'}),mk('br'),
+      mk('small',{textContent:(on?'expires '+when(s.expires):s.state)+(s.subpages?' · + subpages':'')+' · opened '+s.uses+'×'})),
+      ...(on?[mk('button',{type:'button',className:'ghost',textContent:'Copy',onclick:()=>copyLink(s.url)}),
+             mk('button',{type:'button',className:'ghost',textContent:'Revoke',onclick:()=>revokeShare(s.id)})]:[]))})
+    :[mk('li',{className:'off',textContent:'No links yet.'})]))}
+async function revokeShare(id){const r=await fetch('/api/share/revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  shMsg(r.ok?'Link revoked':'⚠ '+r.status);listShares()}
+$('#sh-create').onclick=async()=>{shMsg('');
+  const r=await fetch('/api/share',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:shareP,
+    hours:+$('#sh-hours').value,subpages:!$('#sh-sub').hidden&&$('#sh-subpages').checked,label:$('#sh-label').value})});
+  const d=await r.json();if(!r.ok){shMsg('⚠ '+(d.detail||r.status));return}
+  $('#sh-out').hidden=false;$('#sh-url').value=d.url;$('#sh-url').select();copyLink(d.url);listShares()};
+$('#sh-copy').onclick=()=>copyLink($('#sh-url').value);
 addEventListener('hashchange',show);loadTree().then(show);
 </script>"""
 
