@@ -233,20 +233,23 @@ def _folder_id(d: Path, create: bool = False) -> str:
     even reusing the inode) has no id or another one, so old links don't open it.
     Moves and deletes through qillqa also revoke the links outright."""
     f = d / _ID_FILE
-    try:
-        v = f.read_text().strip()
-    except FileNotFoundError:
-        v = ""
-    if _ID_RE.match(v) or not create:
+
+    def read() -> str:
+        try:
+            v = f.read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            v = ""
         return v if _ID_RE.match(v) else ""
-    v = os.urandom(16).hex()
-    try:  # O_EXCL: two shares created at once agree on one id
-        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return _folder_id(d)
-    with os.fdopen(fd, "w") as out:
-        out.write(v)
-    return v
+    if not create:
+        return read()
+    with page_lock():  # one creator at a time; the file appears complete or not at all
+        v = read()
+        if not v:  # missing, or left empty/invalid by a crash: (re)write it
+            v = os.urandom(16).hex()
+            tmp = d / f"{_ID_FILE}.{os.getpid()}.tmp"
+            tmp.write_text(v)
+            os.replace(tmp, f)
+        return v
 
 
 def _revoke_under(rel: str) -> None:
@@ -322,8 +325,9 @@ def share_resolve(token: str, count: bool = False) -> dict | None:
         if not r or r["revoked"] or r["expires"] <= time.time():
             return None
         try:
-            if not r["folder"] or _folder_id(_safe(r["path"])) != r["folder"]:
-                return None  # moved, deleted, or another page now lives at that path
+            d = _safe(r["path"])
+            if d != PAGES / r["path"] or not r["folder"] or _folder_id(d) != r["folder"]:
+                return None  # moved (also behind a symlink left at the old path), deleted, or replaced
         except (OSError, ValueError):
             return None
         if count:

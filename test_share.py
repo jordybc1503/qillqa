@@ -178,6 +178,23 @@ s11 = server.share_create("fin", 1)
 for path in ("fin/public.txt", "fin/pub/a.txt"):
     r = anon.get(f"/s/{s11['token']}/p/{path}")
     assert r.status_code == 404 and "hidden" not in r.text, path
+# moved by hand with a symlink left at the old path: the old link does not follow it
+server.write_page("mvd", "# Moved\n\nv1", "md", True)
+s12 = server.share_create("mvd", 1)
+shutil.move(str(server.PAGES / "mvd"), str(server.PAGES / "mvd-real"))
+(server.PAGES / "mvd").symlink_to(server.PAGES / "mvd-real")
+assert anon.get(f"/s/{s12['token']}").status_code == 410, "alias at the old path"
+# an identity file left empty (a crash) is repaired; shares created at once all work
+server.write_page("rep", "# Rep\n\nv1", "md", True)
+(server.PAGES / "rep" / ".qillqa-id").write_text("")
+assert anon.get(f"/s/{server.share_create('rep', 1)['token']}").status_code == 200
+import threading  # noqa: E402
+server.write_page("race", "# Race\n\nv1", "md", True)
+made = []
+threads = [threading.Thread(target=lambda: made.append(server.share_create("race", 1))) for _ in range(8)]
+[t.start() for t in threads]
+[t.join() for t in threads]
+assert len(made) == 8 and all(anon.get(f"/s/{m['token']}").status_code == 200 for m in made), "concurrent creation"
 server.write_page("swap", "# Swap\n\nv1", "md", True)
 s9 = server.share_create("swap", 1)
 (server.PAGES / "swap" / "index.md").unlink()
