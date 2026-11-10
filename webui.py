@@ -977,9 +977,19 @@ def _origin(req: Request) -> str:
     return f"{proto}://{host}"
 
 
+async def _json_obj(req: Request) -> dict:
+    try:
+        b = await req.json()
+    except ValueError:
+        b = None
+    if not isinstance(b, dict):
+        raise HTTPException(400, "expected a JSON object")
+    return b
+
+
 @app.post("/api/share")
 async def api_share(req: Request):
-    b = await req.json()
+    b = await _json_obj(req)
     hours, sub, label, path = b.get("hours", 168), b.get("subpages", False), b.get("label", ""), b.get("path")
     if (not isinstance(path, str) or not isinstance(sub, bool) or not isinstance(label, str)
             or isinstance(hours, bool) or not isinstance(hours, (int, float))):
@@ -1001,7 +1011,7 @@ def api_shares(req: Request, path: str = ""):
 @app.post("/api/share/revoke")
 async def api_share_revoke(req: Request):
     try:
-        return server.share_revoke(str((await req.json()).get("id", "")))
+        return server.share_revoke(str((await _json_obj(req)).get("id", "")))
     except ValueError as e:
         _bad(e)
 

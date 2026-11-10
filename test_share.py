@@ -37,6 +37,9 @@ assert anon.get("/api/shares").status_code == 401
 assert anon.post("/api/share/revoke", json={"id": "x"}).status_code == 401
 assert owner.post("/api/share", json={"path": "", "hours": 1}).status_code == 404, "root is not a page"
 assert owner.post("/api/share", json={"path": "../etc", "hours": 1}).status_code == 404
+for body in ("[]", "null", "not json"):  # not an object: 400, never a 500
+    assert owner.post("/api/share", content=body).status_code == 400, body
+    assert owner.post("/api/share/revoke", content=body).status_code == 400, body
 assert owner.post("/api/share", json={"path": "fin", "hours": 0}).status_code == 404
 assert owner.post("/api/share", json={"path": "fin", "hours": 24 * 91}).status_code == 404
 for bad in ({"path": "fin", "subpages": "false"}, {"path": "fin", "hours": "1"}, {"path": "fin", "hours": True},
