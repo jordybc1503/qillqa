@@ -958,7 +958,8 @@ def share_file(token: str, rest: str, req: Request):
         target = _safe(rest)
     except ValueError as e:
         _bad(e)
-    if not _in_share(share, target) or (target.is_dir() and not _real_index(target)):
+    hidden = any(x.startswith(".") for x in target.relative_to(PAGES).parts)  # also through a symlink
+    if hidden or not _in_share(share, target) or (target.is_dir() and not _real_index(target)):
         raise HTTPException(404, "not found")
     r = _serve(target, req, live=False, link=_share_link(share, token))
     r.headers["X-Robots-Tag"] = "noindex, nofollow"
@@ -1384,8 +1385,8 @@ const shMsg=t=>{t=t||'';$('#sh-msg').textContent=t;$('#sh-msg').classList.toggle
 function openShare(p){const n=nodeAt(nodes,p);shareP=p;shGen++;$('#sh-list').replaceChildren();$('#sh-url').value='';$('#sh-title').textContent=(n&&n.title)||p;
   $('#sh-sub').hidden=!(n&&hasSub(n));$('#sh-subpages').checked=false;$('#sh-label').value='';$('#sh-out').hidden=true;shMsg('');
   $('#share').showModal();listShares()}
-async function copyLink(url){try{await navigator.clipboard.writeText(url);shMsg('Link copied')}
-  catch(_){$('#sh-out').hidden=false;$('#sh-url').value=url;$('#sh-url').select();shMsg('Copy it with Ctrl+C')}}
+async function copyLink(url){const g=shGen;try{await navigator.clipboard.writeText(url);if(g===shGen)shMsg('Link copied')}
+  catch(_){if(g!==shGen)return;$('#sh-out').hidden=false;$('#sh-url').value=url;$('#sh-url').select();shMsg('Copy it with Ctrl+C')}}
 async function listShares(){const g=shGen,r=await fetch('/api/shares?path='+encodeURIComponent(shareP));if(g!==shGen)return;
   const rows=r.ok?await r.json():[];if(g!==shGen)return;const when=t=>new Date(t*1000).toLocaleString([],{dateStyle:'medium',timeStyle:'short'});
   $('#sh-list').replaceChildren(...(rows.length?rows.map(s=>{const on=s.state==='active';
@@ -1402,6 +1403,7 @@ $('#sh-create').onclick=async()=>{shMsg('');const g=shGen;
   const d=await r.json();if(g!==shGen)return;if(!r.ok){shMsg('⚠ '+(d.detail||r.status));return}
   $('#sh-out').hidden=false;$('#sh-url').value=d.url;$('#sh-url').select();copyLink(d.url);listShares()};
 $('#sh-copy').onclick=()=>copyLink($('#sh-url').value);
+$('#share').addEventListener('close',()=>{shGen++});  // a reply that lands after closing changes nothing
 addEventListener('hashchange',show);loadTree().then(show);
 </script>"""
 

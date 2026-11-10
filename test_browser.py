@@ -447,6 +447,18 @@ try:
                 break
             pg.wait_for_timeout(100)
         assert (tmp / "other" / "index.md").read_text() == "# Other\n\nedited\n"
+        # share dialog: a clipboard reply that lands after you moved to another page changes nothing
+        pg.evaluate("""()=>{window.__rej=null;Object.defineProperty(navigator.clipboard,'writeText',
+          {configurable:true,value:()=>new Promise((_,rej)=>{window.__rej=rej})})}""")
+        pg.evaluate("openShare('plan')")
+        pg.click("#sh-create")
+        pg.wait_for_function("!!window.__rej")  # (a bare function would be CALLED as the predicate)
+        assert pg.input_value("#sh-url").startswith(base + "/s/")
+        pg.evaluate("document.getElementById('share').close()")
+        pg.evaluate("openShare('proj')")
+        pg.evaluate("window.__rej(new Error('denied'))")
+        pg.wait_for_timeout(300)
+        assert pg.input_value("#sh-url") == "" and pg.is_hidden("#sh-out"), "a late reply put another page's link"
         b.close()
 finally:  # the whole group: an edit reindexes, which spawns the embedder child
     os.killpg(srv.pid, signal.SIGTERM)

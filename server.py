@@ -223,11 +223,30 @@ def _shares_db() -> sqlite3.Connection:
     return c
 
 
-def _folder_id(d: Path) -> str:
-    """Identity of a page folder: a page deleted and created again at the same path is
-    another page, so its old links must not open it (move/delete also revoke them)."""
-    st = d.stat()
-    return f"{st.st_dev}:{st.st_ino}"
+_ID_FILE = ".qillqa-id"  # hidden: never served, listed or exported
+_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _folder_id(d: Path, create: bool = False) -> str:
+    """Identity of a page folder: a random id kept in d/.qillqa-id, created the first time
+    the page is shared. A page deleted and created again at the same path (even by hand,
+    even reusing the inode) has no id or another one, so old links don't open it.
+    Moves and deletes through qillqa also revoke the links outright."""
+    f = d / _ID_FILE
+    try:
+        v = f.read_text().strip()
+    except FileNotFoundError:
+        v = ""
+    if _ID_RE.match(v) or not create:
+        return v if _ID_RE.match(v) else ""
+    v = os.urandom(16).hex()
+    try:  # O_EXCL: two shares created at once agree on one id
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _folder_id(d)
+    with os.fdopen(fd, "w") as out:
+        out.write(v)
+    return v
 
 
 def _revoke_under(rel: str) -> None:
@@ -271,7 +290,7 @@ def share_create(path: str, hours: float = 168, subpages: bool = False, label: s
     sid, now = os.urandom(8).hex(), time.time()
     with contextlib.closing(_shares_db()) as c, c:
         c.execute("insert into shares(id,path,subpages,label,created,expires,folder) values(?,?,?,?,?,?,?)",
-                  (sid, _rel(d), int(bool(subpages)), label, now, now + hours * 3600, _folder_id(d)))
+                  (sid, _rel(d), int(bool(subpages)), label, now, now + hours * 3600, _folder_id(d, create=True)))
         return _share_out(c.execute("select * from shares where id=?", (sid,)).fetchone(), base)
 
 
@@ -303,7 +322,7 @@ def share_resolve(token: str, count: bool = False) -> dict | None:
         if not r or r["revoked"] or r["expires"] <= time.time():
             return None
         try:
-            if _folder_id(_safe(r["path"])) != r["folder"]:
+            if not r["folder"] or _folder_id(_safe(r["path"])) != r["folder"]:
                 return None  # moved, deleted, or another page now lives at that path
         except (OSError, ValueError):
             return None

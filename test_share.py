@@ -162,6 +162,22 @@ s8 = server.share_create("hand", 1)
 shutil.move(str(server.PAGES / "hand"), str(server.PAGES / "hand-old"))  # renamed by hand, not via _move
 server.write_page("hand", "# Hand v2\n\nanother page at the same path", "md", True)
 assert anon.get(f"/s/{s8['token']}").status_code == 410
+server.write_page("gone", "# Gone\n\nv1", "md", True)
+s10 = server.share_create("gone", 1)
+assert (server.PAGES / "gone" / ".qillqa-id").is_file()
+assert anon.get(f"/s/{s10['token']}/p/gone/.qillqa-id").status_code == 404, "the identity file is never served"
+shutil.rmtree(server.PAGES / "gone")  # deleted by hand; the new folder may even reuse the inode
+server.write_page("gone", "# Gone v2\n\nanother page", "md", True)
+assert anon.get(f"/s/{s10['token']}").status_code == 410, "deleted and created again by hand"
+# hidden files through a symlink: a file alias and a folder alias
+(server.PAGES / "fin" / "public.txt").symlink_to(server.PAGES / "fin" / ".secret")
+(server.PAGES / "fin" / ".hid").mkdir()
+(server.PAGES / "fin" / ".hid" / "a.txt").write_text("hidden too")
+(server.PAGES / "fin" / "pub").symlink_to(server.PAGES / "fin" / ".hid")
+s11 = server.share_create("fin", 1)
+for path in ("fin/public.txt", "fin/pub/a.txt"):
+    r = anon.get(f"/s/{s11['token']}/p/{path}")
+    assert r.status_code == 404 and "hidden" not in r.text, path
 server.write_page("swap", "# Swap\n\nv1", "md", True)
 s9 = server.share_create("swap", 1)
 (server.PAGES / "swap" / "index.md").unlink()
