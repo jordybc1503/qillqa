@@ -24,6 +24,9 @@ server.write_page("fin", "# Finanzas\n\nIngresos ![g](chart.png)\n\n| ok |\n|---
 server.write_page("fin/sub", "<title>Sub</title><p>sub secret</p><script>var x=1</script>", "html", True)
 (server.PAGES / "fin" / "sub" / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 server.write_page("other", "# Other\n\nnot shared", "md", True)
+(server.PAGES / "fin" / ".secret").write_text("hidden")
+server.write_page("priv", "# Privado\n\nprivate payroll", "md", True)
+server.write_page("fin/sub/deep", "# Deep\n\nlinks: [up](#fin) [other](#other) [sub](#fin/sub)", "md", True)
 
 owner = TestClient(webui.app, cookies={webui.COOKIE: webui.SESSION})
 anon = TestClient(webui.app)
@@ -36,6 +39,9 @@ assert owner.post("/api/share", json={"path": "", "hours": 1}).status_code == 40
 assert owner.post("/api/share", json={"path": "../etc", "hours": 1}).status_code == 404
 assert owner.post("/api/share", json={"path": "fin", "hours": 0}).status_code == 404
 assert owner.post("/api/share", json={"path": "fin", "hours": 24 * 91}).status_code == 404
+for bad in ({"path": "fin", "subpages": "false"}, {"path": "fin", "hours": "1"}, {"path": "fin", "hours": True},
+            {"path": "fin", "label": 3}, {"path": ["fin"]}):
+    assert owner.post("/api/share", json=bad).status_code == 400, bad
 r = owner.post("/api/share", json={"path": "fin", "hours": 1, "label": "  Julio\n <b>x</b> "},
                headers={"host": "jordi-omen.tail.ts.net"})
 assert r.status_code == 200, r.text
@@ -69,6 +75,8 @@ assert anon.get(base + "sub/x.png").status_code == 404, "file of a subpage not s
 assert anon.get(f"/s/{tok}/p/other/").status_code == 404, "another page"
 assert anon.get(f"/s/{tok}/p/fin/%2e%2e/other/").status_code == 404, ".. inside /s"
 assert anon.get(f"/s/{tok}/p/").status_code == 404
+assert anon.get(f"/s/{tok}/p/fin/%2e%2e/fin/chart.png").status_code == 404, ".. back into the scope"
+assert anon.get(f"/s/{tok}/p/fin/.secret").status_code == 404, "hidden file"
 assert anon.get(f"/s/{tok}/p/fin", follow_redirects=False).status_code == 307, "relative links need the trailing slash"
 
 # --- forged / unknown tokens
@@ -85,6 +93,7 @@ assert uses[sid] == 1, uses
 with sqlite3.connect(server.SHARES_DB) as db:
     db.execute("update shares set expires=? where id=?", (time.time() - 1, sid))
 assert anon.get(f"/s/{tok}").status_code == 410
+assert anon.get(f"/s/{tok}/p/fin", follow_redirects=False).status_code == 410, "no redirect for a dead link"
 assert anon.get(base).status_code == 410 and anon.get(base + "chart.png").status_code == 410
 assert [s["state"] for s in owner.get("/api/shares?path=fin").json()] == ["expired"]
 
@@ -96,6 +105,10 @@ assert "<select" in v2.text and "Sub" in v2.text
 assert anon.get(f"/s/{t2}/p/fin/sub/").status_code == 200
 assert anon.get(f"/s/{t2}/p/fin/sub/x.png").status_code == 200
 assert anon.get(f"/s/{t2}/p/other/").status_code == 404
+deep = anon.get(f"/s/{t2}/p/fin/sub/deep/").text
+assert f'href="/s/{t2}/p/fin/"' in deep and f'href="/s/{t2}/p/fin/sub/"' in deep, "links to shared pages stay in the share"
+assert 'href="/#other"' not in deep and "/p/other/" not in deep, "never a way out to the notebook"
+assert deep.count('class="off"') == 1, "a link to a page outside the share is inert"
 assert owner.post("/api/share/revoke", json={"id": s2["id"]}).json()["state"] == "revoked"
 assert anon.get(f"/s/{t2}/p/fin/sub/").status_code == 410, "revoked at once"
 assert owner.post("/api/share/revoke", json={"id": "nope"}).status_code == 404
@@ -114,6 +127,47 @@ try:
 finally:
     server.TOKEN = real
 assert anon.get(f"/s/{s4['token']}").status_code == 200
+
+# --- symlinks: an index or a folder that points elsewhere opens nothing
+os.symlink(server.PAGES / "priv" / "index.md", server.PAGES / "fin" / "sub" / "sneak.md")
+(server.PAGES / "fin" / "alias").symlink_to(server.PAGES / "priv")
+(server.PAGES / "fin" / "fake").mkdir()
+(server.PAGES / "fin" / "fake" / "index.md").symlink_to(server.PAGES / "priv" / "index.md")
+s5 = server.share_create("fin", 1, True)
+v5 = anon.get(f"/s/{s5['token']}").text
+assert "Privado" not in v5 and "alias" not in v5 and "fake" not in v5, "no titles through symlinks"
+for path in ("fin/alias/", "fin/fake/", "fin/sub/sneak.md"):
+    r = anon.get(f"/s/{s5['token']}/p/{path}")
+    assert r.status_code == 404 and "payroll" not in r.text, path
+server.write_page("linked", "x", "md", True)
+(server.PAGES / "linked" / "index.md").unlink()
+(server.PAGES / "linked" / "index.md").symlink_to(server.PAGES / "priv" / "index.md")
+assert owner.post("/api/share", json={"path": "linked"}).status_code == 404, "symlinked index can't be shared"
+
+# --- a page deleted or moved and created again at the same path: the old link stays dead
+s6 = server.share_create("priv", 1)
+server._delete("priv", True)
+server.write_page("priv", "# Nuevo\n\nnew page, same path", "md", True)
+assert anon.get(f"/s/{s6['token']}").status_code == 410 and anon.get(f"/s/{s6['token']}/p/priv/").status_code == 410
+assert [s["state"] for s in server.share_list("priv") if s["id"] == s6["id"]] == ["revoked"]
+s7 = server.share_create("priv", 1)
+server._move("priv", "priv2")
+server.write_page("priv", "# Otra\n\nanother page", "md", True)
+assert anon.get(f"/s/{s7['token']}").status_code == 410
+
+# --- changed by hand, outside the MCP: the folder identity still stops the old link
+import shutil  # noqa: E402
+server.write_page("hand", "# Hand\n\nv1", "md", True)
+s8 = server.share_create("hand", 1)
+shutil.move(str(server.PAGES / "hand"), str(server.PAGES / "hand-old"))  # renamed by hand, not via _move
+server.write_page("hand", "# Hand v2\n\nanother page at the same path", "md", True)
+assert anon.get(f"/s/{s8['token']}").status_code == 410
+server.write_page("swap", "# Swap\n\nv1", "md", True)
+s9 = server.share_create("swap", 1)
+(server.PAGES / "swap" / "index.md").unlink()
+(server.PAGES / "swap" / "index.md").symlink_to(server.PAGES / "priv" / "index.md")
+assert anon.get(f"/s/{s9['token']}").status_code == 410, "index swapped for a symlink after sharing"
+assert anon.get(f"/s/{s9['token']}/p/swap/").status_code == 404
 
 # --- MCP tools
 import json  # noqa: E402

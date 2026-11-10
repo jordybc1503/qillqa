@@ -182,6 +182,7 @@ def _move(src: str, dst: str) -> dict:
         raise ValueError("cannot move a page inside itself")
     t.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(s), str(t))
+    _revoke_under(_rel(s))
     return {"path": _rel(t), "url": f"{URL}/#{_rel(t)}"}
 
 
@@ -194,6 +195,7 @@ def _delete(path: str, recursive: bool = False) -> dict:
     if kids and not recursive:
         raise ValueError(f"{path!r} has {len(kids)} subpages; pass recursive=True")
     shutil.rmtree(d)
+    _revoke_under(_rel(d))
     return {"deleted": _rel(d)}
 
 
@@ -216,8 +218,24 @@ def _shares_db() -> sqlite3.Connection:
     c.row_factory = sqlite3.Row
     c.execute("""create table if not exists shares(id text primary key, path text not null,
                  subpages integer not null, label text not null default '', created real not null,
-                 expires real not null, revoked real, uses integer not null default 0, last_used real)""")
+                 expires real not null, revoked real, uses integer not null default 0, last_used real,
+                 folder text not null default '')""")
     return c
+
+
+def _folder_id(d: Path) -> str:
+    """Identity of a page folder: a page deleted and created again at the same path is
+    another page, so its old links must not open it (move/delete also revoke them)."""
+    st = d.stat()
+    return f"{st.st_dev}:{st.st_ino}"
+
+
+def _revoke_under(rel: str) -> None:
+    """After a move or delete: the links of that page and of every page under it stop."""
+    with contextlib.closing(_shares_db()) as c, c:
+        ids = [r["id"] for r in c.execute("select id, path from shares where revoked is null")
+               if r["path"] == rel or r["path"].startswith(rel + "/")]
+        c.executemany("update shares set revoked=? where id=?", [(time.time(), i) for i in ids])
 
 
 def _share_mac(sid: str) -> str:
@@ -244,14 +262,16 @@ def share_create(path: str, hours: float = 168, subpages: bool = False, label: s
     d = _safe(path)
     if d == PAGES or not _index(d):
         raise ValueError(f"no page at {path!r}")
+    if _index(d).is_symlink():
+        raise ValueError("a page whose index file is a symlink can't be shared")
     hours = float(hours)
     if not 0 < hours <= SHARE_MAX_HOURS:
         raise ValueError(f"hours must be between 0 and {SHARE_MAX_HOURS}")
     label = " ".join(str(label or "").split())[:120]
     sid, now = os.urandom(8).hex(), time.time()
     with contextlib.closing(_shares_db()) as c, c:
-        c.execute("insert into shares(id,path,subpages,label,created,expires) values(?,?,?,?,?,?)",
-                  (sid, _rel(d), int(bool(subpages)), label, now, now + hours * 3600))
+        c.execute("insert into shares(id,path,subpages,label,created,expires,folder) values(?,?,?,?,?,?,?)",
+                  (sid, _rel(d), int(bool(subpages)), label, now, now + hours * 3600, _folder_id(d)))
         return _share_out(c.execute("select * from shares where id=?", (sid,)).fetchone(), base)
 
 
@@ -281,6 +301,11 @@ def share_resolve(token: str, count: bool = False) -> dict | None:
     with contextlib.closing(_shares_db()) as c, c:
         r = c.execute("select * from shares where id=?", (sid,)).fetchone()
         if not r or r["revoked"] or r["expires"] <= time.time():
+            return None
+        try:
+            if _folder_id(_safe(r["path"])) != r["folder"]:
+                return None  # moved, deleted, or another page now lives at that path
+        except (OSError, ValueError):
             return None
         if count:
             c.execute("update shares set uses=uses+1, last_used=? where id=?", (time.time(), sid))

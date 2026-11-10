@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 import embedder
 import server
-from server import MODEL, PAGES, TOKEN, VAR, _index, _rel, _safe, _title, read_page, tree
+from server import MODEL, PAGES, TOKEN, VAR, _children, _index, _rel, _safe, _title, read_page, tree
 
 IDLE_MIN = float(os.environ.get("QILLQA_MODEL_IDLE_MIN", "15"))
 # Calibrated on Qwen3-Embedding-0.6B: hits 0.41-0.65, noise <= 0.21
@@ -701,7 +701,7 @@ tr.dragging td{opacity:.45}tr.drop-before :is(td,th){box-shadow:inset 0 3px 0 va
 </style>"""
 
 
-def _render_md(title: str, text: str, cap: str = "", nonce: str = "", theme: str = "light") -> str:
+def _render_md(title: str, text: str, cap: str = "", nonce: str = "", theme: str = "light", link=None) -> str:
     """With a capability and a nonce, boxes markdown put in table rows / list items are live."""
     kinds = _kinds(text) if cap else {}
     if kinds:
@@ -738,7 +738,7 @@ def _render_md(title: str, text: str, cap: str = "", nonce: str = "", theme: str
                   r'<audio controls preload="metadata" src="\2" title="\1"></audio>', body, flags=re.I)
     # [x](#other/page) or [x](/#other/page) opens that notebook page in place (the shell
     # follows the hash); a #heading of this page stays an in-page anchor
-    body = re.sub(r'<a href="/?#([^"]+)"', lambda m: _page_link(m, body), body)
+    body = re.sub(r'<a href="/?#([^"]+)"', lambda m: _page_link(m, body, link), body)
     # other links leave the sandboxed page in a new tab
     body = re.sub(r'<a href="(?!#)', '<a target="_blank" href="', body)
     body = body.replace("<table>", '<div class="tw"><table>').replace("</table>", "</table></div>")
@@ -746,7 +746,8 @@ def _render_md(title: str, text: str, cap: str = "", nonce: str = "", theme: str
     return _shell(title, f'<article{attr}>{body}</article>', theme)
 
 
-def _page_link(m: re.Match, body: str) -> str:
+def _page_link(m: re.Match, body: str, link=None) -> str:
+    """link: in a share, maps a page path to its URL inside the share, or None (not shared)."""
     frag = m.group(1)
     if f'id="{frag}"' in body:
         return m.group(0)
@@ -756,6 +757,9 @@ def _page_link(m: re.Match, body: str) -> str:
         return m.group(0)
     if d == PAGES or not _index(d):
         return m.group(0)
+    if link:
+        href = link(_rel(d))
+        return f'<a href="{html.escape(href)}"' if href else '<a class="off" title="Not shared"'
     return f'<a target="_top" href="/#{frag}"'
 
 
@@ -804,7 +808,7 @@ def signed_file(sig: str, rest: str, req: Request):
     return _serve(target, req)
 
 
-def _serve(target: Path, req: Request, live: bool = True):
+def _serve(target: Path, req: Request, live: bool = True, link=None):
     """A page folder (rendered, sandboxed) or one of its files. live=False: read-only
     (no checklist capability), for share links."""
     if target.is_dir():
@@ -821,7 +825,7 @@ def _serve(target: Path, req: Request, live: bool = True):
             body, csp = (_render_md(_title(target), text, cap, nonce, _theme(req)),
                          f"{_MD_LIVE_SANDBOX}; script-src 'nonce-{nonce}'")
         else:
-            body, csp = _render_md(_title(target), text, theme=_theme(req)), _MD_SANDBOX
+            body, csp = _render_md(_title(target), text, theme=_theme(req), link=link), _MD_SANDBOX
         return Response(body, media_type="text/html; charset=utf-8",
                         headers={**_SAFE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": csp})
     if not target.is_file():
@@ -852,6 +856,47 @@ div{max-width:380px;padding:28px;background:#fff;border-radius:14px;text-align:c
 _SHARE_HEADERS = {**_SAFE_HEADERS, "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"}
 
 
+def _real_index(d: Path) -> Path | None:
+    """The page's index only if it is a real file of that folder (a symlinked index shows
+    another page's content)."""
+    idx = _index(d)
+    return idx if idx and not idx.is_symlink() and idx.resolve().parent == d.resolve() else None
+
+
+def _share_pages(share: dict) -> list[tuple[str, str, int]]:
+    """(path, title, depth) the share opens, walking real folders only (no symlinks)."""
+    scope = _safe(share["path"])
+    out = [(share["path"], _title(scope), 0)]
+
+    def walk(d: Path, depth: int):
+        for c in _children(d):
+            if c.is_symlink() or not _in_share(share, c.resolve()):
+                continue
+            real = _real_index(c)
+            if real:
+                out.append((_rel(c), _title(c), depth))
+            walk(c, depth + (1 if real else 0))
+    if share["subpages"]:
+        walk(scope, 1)
+    return out
+
+
+def _share_link(share: dict, token: str):
+    """Notebook links inside a shared page: to a shared page -> its URL in the share."""
+    def link(rel: str) -> str | None:
+        inside = rel == share["path"] or (share["subpages"] and rel.startswith(share["path"] + "/"))
+        if not inside:
+            return None
+        try:
+            d = _safe(rel)
+        except ValueError:
+            return None
+        if not _in_share(share, d) or not _real_index(d):
+            return None
+        return f"/s/{token}/p/" + "".join(urllib.parse.quote(seg) + "/" for seg in rel.split("/"))
+    return link
+
+
 def _in_share(share: dict, target: Path) -> bool:
     """Inside the shared page; without subpages, no folder below it that is a page."""
     scope = _safe(share["path"])
@@ -872,17 +917,9 @@ def share_view(token: str, req: Request):
     share = server.share_resolve(token, count=True)
     if not share:
         return HTMLResponse(_GONE, status_code=410, headers=_SHARE_HEADERS)
-    scope = _safe(share["path"])
-    if not _index(scope):
+    if not _real_index(_safe(share["path"])):
         return HTMLResponse(_GONE, status_code=410, headers=_SHARE_HEADERS)
-    pages = [(share["path"], _title(scope), 0)]
-    if share["subpages"]:
-        def walk(nodes, depth):
-            for n in nodes:
-                if n["page"]:
-                    pages.append((n["path"], n["title"], depth))
-                walk(n["children"], depth + (1 if n["page"] else 0))
-        walk(tree(share["path"]), 1)
+    pages = _share_pages(share)
     base = f"/s/{urllib.parse.quote(token)}/p/"
     src = lambda rel: base + "".join(urllib.parse.quote(seg) + "/" for seg in rel.split("/"))
     exp = time.strftime("%d/%m/%Y %H:%M", time.localtime(share["expires"]))
@@ -921,9 +958,9 @@ def share_file(token: str, rest: str, req: Request):
         target = _safe(rest)
     except ValueError as e:
         _bad(e)
-    if not _in_share(share, target):
+    if not _in_share(share, target) or (target.is_dir() and not _real_index(target)):
         raise HTTPException(404, "not found")
-    r = _serve(target, req, live=False)
+    r = _serve(target, req, live=False, link=_share_link(share, token))
     r.headers["X-Robots-Tag"] = "noindex, nofollow"
     return r
 
@@ -942,10 +979,13 @@ def _origin(req: Request) -> str:
 @app.post("/api/share")
 async def api_share(req: Request):
     b = await req.json()
+    hours, sub, label, path = b.get("hours", 168), b.get("subpages", False), b.get("label", ""), b.get("path")
+    if (not isinstance(path, str) or not isinstance(sub, bool) or not isinstance(label, str)
+            or isinstance(hours, bool) or not isinstance(hours, (int, float))):
+        raise HTTPException(400, "expected path: string, hours: number, subpages: boolean, label: string")
     try:
-        return server.share_create(str(b.get("path", "")), float(b.get("hours", 168)),
-                                   bool(b.get("subpages")), str(b.get("label", "")), _origin(req))
-    except (ValueError, TypeError) as e:
+        return server.share_create(path, hours, sub, label, _origin(req))
+    except ValueError as e:
         _bad(e)
 
 
@@ -1338,28 +1378,28 @@ $('#menu').onclick=()=>bar(!document.body.classList.contains('bar'));
 addEventListener('hashchange',()=>bar(false));  // picked a page: back to reading
 $('#tree').addEventListener('click',e=>{if(e.target.closest('a'))bar(false)});  // ...also the one already open
 // share links: temporary read-only URL of one page (/s/<token>), revocable
-let shareP='';
+let shareP='',shGen=0;
 const hasSub=x=>x.children.some(c=>c.page||hasSub(c));
 const shMsg=t=>{t=t||'';$('#sh-msg').textContent=t;$('#sh-msg').classList.toggle('bad',t.startsWith('⚠'))};
-function openShare(p){const n=nodeAt(nodes,p);shareP=p;$('#sh-title').textContent=(n&&n.title)||p;
+function openShare(p){const n=nodeAt(nodes,p);shareP=p;shGen++;$('#sh-list').replaceChildren();$('#sh-url').value='';$('#sh-title').textContent=(n&&n.title)||p;
   $('#sh-sub').hidden=!(n&&hasSub(n));$('#sh-subpages').checked=false;$('#sh-label').value='';$('#sh-out').hidden=true;shMsg('');
   $('#share').showModal();listShares()}
 async function copyLink(url){try{await navigator.clipboard.writeText(url);shMsg('Link copied')}
   catch(_){$('#sh-out').hidden=false;$('#sh-url').value=url;$('#sh-url').select();shMsg('Copy it with Ctrl+C')}}
-async function listShares(){const p=shareP,r=await fetch('/api/shares?path='+encodeURIComponent(p));if(p!==shareP)return;
-  const rows=r.ok?await r.json():[],when=t=>new Date(t*1000).toLocaleString([],{dateStyle:'medium',timeStyle:'short'});
+async function listShares(){const g=shGen,r=await fetch('/api/shares?path='+encodeURIComponent(shareP));if(g!==shGen)return;
+  const rows=r.ok?await r.json():[];if(g!==shGen)return;const when=t=>new Date(t*1000).toLocaleString([],{dateStyle:'medium',timeStyle:'short'});
   $('#sh-list').replaceChildren(...(rows.length?rows.map(s=>{const on=s.state==='active';
     return mk('li',{className:on?'':'off'},mk('span',{className:'who'},mk('b',{textContent:s.label||'(no label)'}),mk('br'),
       mk('small',{textContent:(on?'expires '+when(s.expires):s.state)+(s.subpages?' · + subpages':'')+' · opened '+s.uses+'×'})),
       ...(on?[mk('button',{type:'button',className:'ghost',textContent:'Copy',onclick:()=>copyLink(s.url)}),
              mk('button',{type:'button',className:'ghost',textContent:'Revoke',onclick:()=>revokeShare(s.id)})]:[]))})
     :[mk('li',{className:'off',textContent:'No links yet.'})]))}
-async function revokeShare(id){const r=await fetch('/api/share/revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
-  shMsg(r.ok?'Link revoked':'⚠ '+r.status);listShares()}
-$('#sh-create').onclick=async()=>{shMsg('');
+async function revokeShare(id){const g=shGen,r=await fetch('/api/share/revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  if(g!==shGen)return;shMsg(r.ok?'Link revoked':'⚠ '+r.status);listShares()}
+$('#sh-create').onclick=async()=>{shMsg('');const g=shGen;
   const r=await fetch('/api/share',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:shareP,
     hours:+$('#sh-hours').value,subpages:!$('#sh-sub').hidden&&$('#sh-subpages').checked,label:$('#sh-label').value})});
-  const d=await r.json();if(!r.ok){shMsg('⚠ '+(d.detail||r.status));return}
+  const d=await r.json();if(g!==shGen)return;if(!r.ok){shMsg('⚠ '+(d.detail||r.status));return}
   $('#sh-out').hidden=false;$('#sh-url').value=d.url;$('#sh-url').select();copyLink(d.url);listShares()};
 $('#sh-copy').onclick=()=>copyLink($('#sh-url').value);
 addEventListener('hashchange',show);loadTree().then(show);
