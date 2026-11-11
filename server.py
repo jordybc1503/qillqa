@@ -21,11 +21,13 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import time
 import urllib.parse
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,6 +44,8 @@ MODEL = os.environ.get("QILLQA_MODEL", "Qwen/Qwen3-Embedding-0.6B")
 PAGES = (BASE / os.path.expanduser(os.environ.get("QILLQA_PAGES_DIR", "pages"))).resolve()
 VAR = Path(os.path.expanduser(os.environ.get("QILLQA_VAR_DIR", BASE / "var")))
 INDEX_NAMES = ("index.md", "index.html")
+DATA_FILE = ".data.sqlite"  # optional per-page database, created on the first db_upsert
+DATA_DIR = "_data"  # reserved segment: <page>/_data/<table>.json serves the rows to the page
 URL = f"http://{HOST}:{PORT}"
 
 mcp = FastMCP("qillqa")
@@ -155,6 +159,7 @@ def write_page(path: str, content: str, fmt: str, create: bool) -> dict:
     d = _safe(path)
     if d == PAGES:
         raise ValueError("give a page path, e.g. 'project/note'")
+    _not_reserved(d)
     exists = _index(d) is not None
     if create and exists:
         raise ValueError(f"{path!r} already exists; use update_page")
@@ -177,6 +182,7 @@ def _move(src: str, dst: str) -> dict:
         raise ValueError(f"{dst!r} already exists")
     if t == s or s in t.parents:
         raise ValueError("cannot move a page inside itself")
+    _not_reserved(t)
     t.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(s), str(t))
     return {"path": _rel(t), "url": f"{URL}/#{_rel(t)}"}
@@ -192,6 +198,110 @@ def _delete(path: str, recursive: bool = False) -> dict:
         raise ValueError(f"{path!r} has {len(kids)} subpages; pass recursive=True")
     shutil.rmtree(d)
     return {"deleted": _rel(d)}
+
+
+def _not_reserved(d: Path) -> None:
+    if DATA_DIR in d.relative_to(PAGES).parts:
+        raise ValueError(f"{DATA_DIR!r} is reserved for page data")
+
+
+# ---------------------------------------------------------------- page data
+# A page that needs to store records gets its own SQLite file (DATA_FILE, hidden)
+# inside its folder, created on the first upsert; pages that store nothing have
+# none. Rows are JSON objects keyed by (table, id). Moving or deleting the page
+# moves or deletes its data with it.
+
+_TABLE = re.compile(r"[a-z0-9_-]{1,64}")
+_FIELD = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
+def _data_page(path: str) -> Path:
+    d = _safe(path)
+    if d == PAGES or not _index(d):
+        raise ValueError(f"no page at {path!r}")
+    return d
+
+
+def _check(rx: re.Pattern, name: str, what: str) -> str:
+    if not isinstance(name, str) or not rx.fullmatch(name):
+        raise ValueError(f"invalid {what} {name!r}: use {rx.pattern}")
+    return name
+
+
+def _data_db(d: Path, create: bool) -> sqlite3.Connection | None:
+    f = d / DATA_FILE
+    if not create and not f.exists():
+        return None
+    con = sqlite3.connect(f, timeout=10)
+    con.execute("PRAGMA journal_mode=WAL")  # the MCP writes while the web server reads
+    con.execute("CREATE TABLE IF NOT EXISTS rows(tbl TEXT NOT NULL, id TEXT NOT NULL, "
+                "data TEXT NOT NULL, updated REAL NOT NULL, PRIMARY KEY(tbl, id))")
+    return con
+
+
+def data_upsert(path: str, table: str, rows: list, key: str = "id") -> dict:
+    d, table, key = _data_page(path), _check(_TABLE, table, "table"), _check(_FIELD, key, "key")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        raise ValueError("rows must be a list of JSON objects")
+    now, con = time.time(), _data_db(d, True)
+    with contextlib.closing(con):
+        with con:
+            for r in rows:
+                rid = r.get(key)
+                if rid in (None, ""):
+                    rid = uuid.uuid4().hex
+                    r = {key: rid, **r}
+                con.execute("INSERT INTO rows VALUES (?, ?, ?, ?) ON CONFLICT(tbl, id) DO UPDATE "
+                            "SET data = excluded.data, updated = excluded.updated",
+                            (table, str(rid), json.dumps(r, ensure_ascii=False), now))
+        n = con.execute("SELECT COUNT(*) FROM rows WHERE tbl = ?", (table,)).fetchone()[0]
+    return {"path": _rel(d), "table": table, "upserted": len(rows), "rows": n}
+
+
+def data_query(path: str, table: str, where: dict | None = None, order_by: str = "",
+               desc: bool = False, limit: int = 500) -> list[dict]:
+    d, table = _data_page(path), _check(_TABLE, table, "table")
+    sql, args = "SELECT data FROM rows WHERE tbl = ?", [table]
+    for k, v in (where or {}).items():
+        if isinstance(v, (dict, list)):
+            raise ValueError("where values must be plain values")
+        sql += " AND json_extract(data, ?) = ?"
+        args += [f"$.{_check(_FIELD, k, 'field')}", v]
+    if order_by:
+        sql += f" ORDER BY json_extract(data, ?) {'DESC' if desc else 'ASC'}"
+        args.append(f"$.{_check(_FIELD, order_by, 'field')}")
+    sql += " LIMIT ?"
+    args.append(max(1, min(int(limit), 10_000)))
+    con = _data_db(d, False)
+    if con is None:
+        return []
+    with contextlib.closing(con):
+        return [json.loads(x) for (x,) in con.execute(sql, args)]
+
+
+def data_tables(path: str) -> dict:
+    d = _data_page(path)
+    con = _data_db(d, False)
+    if con is None:
+        return {"path": _rel(d), "tables": {}}
+    with contextlib.closing(con):
+        return {"path": _rel(d), "tables": dict(con.execute(
+            "SELECT tbl, COUNT(*) FROM rows GROUP BY tbl ORDER BY tbl"))}
+
+
+def data_delete(path: str, table: str, ids: list | None = None) -> dict:
+    d, table = _data_page(path), _check(_TABLE, table, "table")
+    con = _data_db(d, False)
+    if con is None:
+        return {"path": _rel(d), "table": table, "deleted": 0}
+    with contextlib.closing(con):
+        with con:
+            if ids is None:
+                n = con.execute("DELETE FROM rows WHERE tbl = ?", (table,)).rowcount
+            else:
+                n = sum(con.execute("DELETE FROM rows WHERE tbl = ? AND id = ?",
+                                    (table, str(i))).rowcount for i in ids)
+    return {"path": _rel(d), "table": table, "deleted": n}
 
 
 # ---------------------------------------------------------------- server
@@ -337,6 +447,40 @@ def search(query: str, limit: int = 10, path: str = "") -> str:
     the whole notebook. Starts the local server if needed; the first call
     takes a few seconds to load the model and index."""
     return _dump(_search, query, limit, path)
+
+
+@mcp.tool()
+def db_upsert(path: str, table: str, rows: list[dict], key: str = "id") -> str:
+    """Store records for a page (a project) in its own small database. The
+    database is optional: it is created on the first call, and pages that never
+    store data have none. `rows` is a list of JSON objects; each is saved whole
+    under its `key` field (default 'id'; a row without it gets a random id), so
+    upserting the same id again replaces that row. `table` is a name like
+    'listings' (a-z, 0-9, _ -). The page's own HTML/JS reads a table with
+    fetch('_data/<table>.json'); in markdown link it as [data](_data/<table>.json).
+    The data lives in the page folder, so moving or deleting the page carries it."""
+    return _dump(data_upsert, path, table, rows, key)
+
+
+@mcp.tool()
+def db_query(path: str, table: str, where: dict | None = None, order_by: str = "",
+             desc: bool = False, limit: int = 500) -> str:
+    """Read records of a page's table. `where` filters by equality on top-level
+    fields, e.g. {"town": "Sant Boi"}; `order_by` names a field; `limit` <= 10000.
+    A page with no database returns []."""
+    return _dump(data_query, path, table, where, order_by, desc, limit)
+
+
+@mcp.tool()
+def db_tables(path: str) -> str:
+    """List a page's tables with their row counts ({} if the page stores nothing)."""
+    return _dump(data_tables, path)
+
+
+@mcp.tool()
+def db_delete(path: str, table: str, ids: list[str] | None = None) -> str:
+    """Delete records by id from a page's table, or the whole table if `ids` is omitted."""
+    return _dump(data_delete, path, table, ids)
 
 
 @mcp.tool()

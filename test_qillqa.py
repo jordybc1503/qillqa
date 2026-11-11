@@ -606,4 +606,45 @@ finally:
     server.page_lock = real_lock
 assert r.status_code == 409 and (crlf.parent / "index.html").read_text() == "<title>Sub</title>", r.text
 
+
+# ---- optional per-page data
+server.write_page("proj/data", "# Data\n", "md", True)
+pdir = server._safe("proj/data")
+assert server.data_tables("proj/data")["tables"] == {}
+assert server.data_query("proj/data", "listings") == []
+assert not (pdir / server.DATA_FILE).exists(), "reads must not create the database"
+r = server.data_upsert("proj/data", "listings", [{"id": "a", "price": 90000, "town": "Sant Boi"},
+                                                  {"id": "b", "price": 80000, "town": "Cornella"},
+                                                  {"price": 70000, "town": "Sant Boi"}])
+assert r["rows"] == 3 and (pdir / server.DATA_FILE).exists()
+server.data_upsert("proj/data", "listings", [{"id": "a", "price": 95000, "town": "Sant Boi"}])
+rows = server.data_query("proj/data", "listings", where={"town": "Sant Boi"}, order_by="price", desc=True)
+assert [x["price"] for x in rows] == [95000, 70000], rows
+assert server.data_tables("proj/data")["tables"] == {"listings": 3}
+for bad in ({"table": "Bad Name"}, {"where": {"x') OR 1=1 --": 1}}, {"order_by": "a;drop"}):
+    try:
+        kw = {"table": "listings", **bad}
+        server.data_query("proj/data", kw.pop("table"), **kw)
+        raise AssertionError(f"accepted {bad}")
+    except ValueError:
+        pass
+try:
+    server.write_page("proj/_data", "x", "md", True)
+    raise AssertionError("_data must be reserved")
+except ValueError:
+    pass
+assert server.DATA_FILE not in server.read_page("proj/data")["files"]
+url = webui.signed_url("proj/data")
+got = anon.get(url + "_data/listings.json")
+assert got.status_code == 200 and len(got.json()) == 3 and got.headers["access-control-allow-origin"] == "*"
+assert anon.get(url + "_data/nope.json").json() == []
+assert anon.get(url.replace(url.split("/")[2], "0" * 16) + "_data/listings.json").status_code == 404
+assert anon.get(webui.signed_url("proj/data2") + "_data/listings.json").status_code == 404  # no page there
+assert anon.get(url + server.DATA_FILE).status_code == 404  # the file itself is never served
+assert server.data_delete("proj/data", "listings", ["b"])["deleted"] == 1
+server._move("proj/data", "proj/moved")
+assert server.data_tables("proj/moved")["tables"] == {"listings": 2}
+server._delete("proj/moved")
+assert not server._safe("proj/moved").exists()
+
 print("OK: all checks pass")
