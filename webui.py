@@ -801,6 +801,14 @@ def signed_file(sig: str, rest: str, req: Request):
         _bad(e)
     if scope is None or (target != scope.resolve() and scope.resolve() not in target.parents):
         _bad(ValueError("invalid signature"))
+    if len(parts) >= 3 and parts[-2] == server.DATA_DIR and parts[-1].endswith(".json"):
+        # <page>/_data/<table>.json: the page's records, read-only, same capability as its files
+        try:
+            rows = server.data_query("/".join(parts[:-2]), parts[-1][:-5], limit=10_000)
+        except ValueError as e:
+            _bad(e)
+        return JSONResponse(rows, headers={**_SAFE_HEADERS, "Cache-Control": "no-store",
+                                           "Access-Control-Allow-Origin": "*"})
     if target.is_dir():
         if not req.url.path.endswith("/"):  # relative links need the trailing slash
             return RedirectResponse(req.url.path + "/", status_code=307)
