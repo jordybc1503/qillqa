@@ -439,9 +439,9 @@ def signed_url(rel: str) -> str:
     return f"/f/{_sig(rel)}/" + "".join(urllib.parse.quote(seg) + "/" for seg in rel.split("/"))
 
 
-_HTML_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation"
-_MD_SANDBOX = "sandbox allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
-_MD_LIVE_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+_HTML_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation allow-downloads"
+_MD_SANDBOX = "sandbox allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
+_MD_LIVE_SANDBOX = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
 _SAFE_HEADERS = {"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 _VIDEO = r"mp4|webm|mov|m4v"
 _AUDIO = r"mp3|wav|m4a|ogg|flac|opus"
@@ -919,7 +919,7 @@ INDEX = """
 <button id="menu" type="button" aria-label="Menu" title="Menu">☰</button>
 <main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
-<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation" allow="fullscreen" title="page"></iframe>
+<iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation allow-downloads" allow="fullscreen" title="page"></iframe>
 <div id="edit" hidden><div class="ed-bar"><b id="ed-name"></b><small id="ed-msg"></small>
 <button id="ed-cancel" type="button" class="ghost">Close</button><button id="ed-save" type="button">Save</button></div>
 <textarea id="ed-text" spellcheck="false" aria-label="Page source"></textarea>
