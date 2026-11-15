@@ -353,7 +353,7 @@ def _document(title: str, pages: list[dict], b: _Bundle) -> bytes:
                     for i, (_, d) in enumerate(b.blobs))
     data = json.dumps(manifest, ensure_ascii=False).replace("<", "\\u003c")  # no </script, no <!-- states
     return (f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:image/svg+xml;base64,{_ICON}"><title>{html.escape(title)}</title>
 <style>{_CSS}</style></head><body class="{'multi' if len(pages) > 1 else 'single'}">
 <aside id="nav"><div class="brand">{html.escape(title)}<small>qillqa · {manifest['exported']}</small></div><div id="list"></div></aside>
 <button id="menu" type="button" aria-label="Pages">☰</button>
@@ -361,6 +361,8 @@ def _document(title: str, pages: list[dict], b: _Bundle) -> bytes:
 <script type="application/json" id="qx">{data}</script>
 {blobs}<script>{_LOADER}</script></body></html>""").encode()
 
+
+_ICON = base64.b64encode((Path(__file__).resolve().parent / "icons" / "favicon.svg").read_bytes()).decode()  # tab icon, offline
 
 _CSS = """*{box-sizing:border-box}html,body{margin:0;height:100%;font:15px/1.5 system-ui,sans-serif;background:#f4f6fb;color:#1d2433}
 main{position:fixed;inset:0;background:#fff}body.multi main{left:260px}iframe{border:0;width:100%;height:100%;display:block}

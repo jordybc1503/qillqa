@@ -108,13 +108,29 @@ try:
         assert sub.is_hidden(), "fold did not close"
         pg.goto(base + "/#proj/sub")
         assert "in" in pg.locator('nav a[data-path="proj"]').get_attribute("class"), "collapsed parent not marked"
+        assert pg.title() == "proj/sub · qillqa", pg.title()  # the tab names the open page (its heading)
+        # the ☰ is part of the panel, not of the header: hidden pages leave a rail that keeps it
+        assert pg.locator("header #side").count() == 0 and pg.locator("aside #side").count() == 1, "☰ not in the panel"
         pg.click("#side")
-        assert pg.locator("aside").is_hidden(), "sidebar did not hide"
+        assert pg.locator("nav").is_hidden() and pg.locator("#side").is_visible(), "panel did not fold to a rail"
         pg.reload()
-        assert pg.locator("aside").is_hidden(), "hidden sidebar not remembered"
-        assert pg.evaluate("document.querySelector('section').getBoundingClientRect().left") < 5, "page did not take the width"
+        assert pg.locator("nav").is_hidden(), "folded panel not remembered"
+        left = pg.evaluate("document.querySelector('section').getBoundingClientRect().left")
+        assert left < 60, f"page did not take the width ({left})"
+        pg.evaluate("document.body.classList.add('autohide','hid')")  # header auto-hidden: the ☰ stays
+        assert pg.locator("header").is_hidden() and pg.locator("#side").is_visible(), "☰ went away with the header"
         pg.click("#side")
-        assert pg.locator("aside").is_visible(), "sidebar did not come back"
+        pg.evaluate("document.body.classList.remove('autohide','hid')")
+        assert pg.locator("nav").is_visible() and pg.get_attribute("#side", "aria-expanded") == "true", "panel did not come back"
+        # browser chrome: icons and manifest answer before sign-in (no cookies)
+        anon = p.request.new_context()
+        for path, kind in (("/favicon.ico", "image/svg+xml"), ("/favicon.svg", "image/svg+xml"),
+                           ("/apple-touch-icon.png", "image/png"), ("/icon-512.png", "image/png"),
+                           ("/manifest.webmanifest", "application/manifest+json")):
+            r = anon.get(base + path, max_redirects=0)
+            assert r.status == 200 and r.headers["content-type"].startswith(kind), (path, r.status)
+        assert anon.get(base + "/api/tree", max_redirects=0).status == 401, "the gate opened more than the icons"
+        assert pg.locator('link[rel=icon][href="/favicon.svg"]').count() == 1, "no favicon link"
         pg.set_viewport_size({"width": 390, "height": 800})
         assert pg.evaluate("document.documentElement.scrollWidth") <= 390, "overflow at 390 px"
         pg.set_viewport_size({"width": 1200, "height": 800})
