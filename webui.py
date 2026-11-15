@@ -227,11 +227,38 @@ def _authed(req: Request) -> bool:
 
 @app.middleware("http")
 async def gate(req: Request, call_next):
-    if req.url.path in ("/health", "/login") or req.url.path.startswith("/f/") or _authed(req):
+    if req.url.path in ("/health", "/login", *ICONS) or req.url.path.startswith("/f/") or _authed(req):
         return await call_next(req)
     if req.url.path.startswith(("/api/", "/view")):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return RedirectResponse("/login", status_code=303)
+
+
+# browser chrome: tab icon, home-screen icon, install manifest. Public: browsers fetch them
+# before sign-in, and the manifest is fetched without cookies.
+ICON_DIR = Path(__file__).resolve().parent / "icons"
+ICONS = {"/favicon.svg": "favicon.svg", "/favicon.ico": "favicon.svg", "/apple-touch-icon.png": "apple-touch-icon.png",
+         "/icon-512.png": "icon-512.png", "/manifest.webmanifest": ""}
+MANIFEST = {"name": "qillqa", "short_name": "qillqa", "description": "Notebook of nested pages, with semantic search",
+            "start_url": "/", "scope": "/", "display": "standalone", "background_color": "#f4f6fb", "theme_color": "#ffffff",
+            "icons": [{"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml"},
+                      {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
+                      {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}]}
+
+
+@app.get("/favicon.svg")
+@app.get("/favicon.ico")
+@app.get("/apple-touch-icon.png")
+@app.get("/icon-512.png")
+def icon(req: Request):
+    name = ICONS[req.url.path]
+    return FileResponse(ICON_DIR / name, media_type="image/svg+xml" if name.endswith(".svg") else "image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/manifest.webmanifest")
+def manifest():
+    return JSONResponse(MANIFEST, media_type="application/manifest+json")
 
 
 @app.get("/health")
@@ -888,6 +915,7 @@ input,button{font:inherit;padding:10px 12px;border:1px solid var(--line);border-
 button{cursor:pointer;background:linear-gradient(90deg,color-mix(in srgb,var(--c3),#000 var(--dim)),color-mix(in srgb,var(--c1),#000 var(--dim)));color:#fff;border:0}.err{color:var(--c2);margin:0}
 """
 THEMES = ("light", "dark", "night")
+THEME_COLORS = {"light": "#ffffff", "dark": "#171d29", "night": "#13110e"}  # --card: the header's colour
 THEME_COOKIE = "qillqa_theme"
 
 
@@ -901,11 +929,15 @@ def _shell(title: str, body: str, theme: str = "light") -> str:
     theme = theme if theme in THEMES else "light"
     return (f'<!doctype html><html lang="en" data-theme="{theme}"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta name="description" content="qillqa: notebook of nested pages, with semantic search">'
+            f'<meta name="robots" content="noindex,nofollow"><meta name="theme-color" content="{THEME_COLORS[theme]}">'
+            f'<link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+            f'<link rel="manifest" href="/manifest.webmanifest">'
             f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body>{body}</body></html>")
 
 
 INDEX = """
-<header><button id="side" type="button" title="Show / hide the sidebar" aria-label="Show / hide the sidebar">☰</button><a href="#" class="brand">qillqa</a>
+<header><a href="#" class="brand"><img src="/favicon.svg" alt="" width="24" height="24">qillqa</a>
 <input id="q" type="search" placeholder="Search by meaning…" autocomplete="off">
 <label id="scope" hidden title="Search only this folder and its subpages"><input type="checkbox" id="only"> only in <b id="scopename"></b></label>
 <div id="me" class="out"><button id="avatar" type="button" aria-expanded="false" aria-controls="settings" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7z"/></svg></button>
@@ -917,7 +949,8 @@ INDEX = """
 <a href="/logout">Sign out</a></div></div></header>
 <div id="peek" title="Show the header"></div>
 <button id="menu" type="button" aria-label="Menu" title="Menu">☰</button>
-<main><aside><button id="toggle">Pages</button><nav id="tree"></nav></aside>
+<main><aside><div class="side-head"><button id="side" type="button" title="Hide the pages panel" aria-label="Hide the pages panel" aria-expanded="true" aria-controls="tree">☰</button><span>Pages</span></div>
+<button id="toggle">Pages</button><nav id="tree"></nav></aside>
 <section><div id="results" hidden></div><div id="crumb"></div>
 <iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation allow-downloads" allow="fullscreen" title="page"></iframe>
 <div id="edit" hidden><div class="ed-bar"><b id="ed-name"></b><small id="ed-msg"></small>
@@ -928,7 +961,7 @@ INDEX = """
 <style>
 header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--card);
 border-bottom:3px solid;border-image:linear-gradient(90deg,var(--c2),var(--c3),var(--c1)) 1}
-.brand{font-weight:800;font-size:1.15em;text-decoration:none;background:linear-gradient(90deg,var(--c2),var(--c3));
+.brand img{border-radius:6px;box-shadow:none}.brand{display:flex;align-items:center;gap:8px;flex:none;font-weight:800;font-size:1.15em;text-decoration:none;background:linear-gradient(90deg,var(--c2),var(--c3));
 -webkit-background-clip:text;background-clip:text;color:transparent}
 #q{flex:1;min-width:0;background:var(--bg)}#q:focus{outline:2px solid var(--c3);background:var(--card)}
 #me{position:relative;flex:none}#avatar{display:flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;border-radius:50%}
@@ -949,14 +982,17 @@ border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px color-mix(
 main{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 62px)}
 aside{background:var(--side);border-right:1px solid var(--line);overflow:auto;padding:10px}#toggle{display:none}
 nav ul{list-style:none;margin:0;padding-left:14px}nav>ul{padding-left:0}
-#side{background:none;border:0;color:var(--mute);font-size:1.2em;padding:2px 6px;cursor:pointer}#side:hover{color:var(--c3)}
+.side-head{display:flex;align-items:center;gap:6px;margin:0 0 6px;color:var(--mute);font-size:.75em;text-transform:uppercase;letter-spacing:.06em}
+#side{flex:none;width:32px;height:32px;padding:0;background:none;border:0;border-radius:8px;color:var(--mute);font-size:1.25rem;line-height:1;cursor:pointer}
+#side:hover,#side:focus-visible{color:var(--c3);background:color-mix(in srgb,var(--c3) 10%,var(--card));outline:0}
 #q{height:46px}header:not(.searching) #scope{display:none}
 /* desktop auto-hide: the header goes away while reading; a thin strip at the top brings it back */
 #peek{display:none}
 @media (min-width:761px){body.autohide.hid header{display:none}body.autohide.hid main{height:100vh}
 body.autohide.hid #peek{display:block;position:fixed;top:0;left:0;right:0;height:8px;z-index:30;cursor:pointer;
 background:linear-gradient(90deg,var(--c2),var(--c3),var(--c1));opacity:.45}body.autohide.hid #peek:hover{opacity:1}}
-body.noside main{grid-template-columns:1fr}body.noside aside{display:none}
+@media (min-width:761px){body.noside main{grid-template-columns:48px 1fr}body.noside aside{padding:10px 8px;overflow:hidden}
+body.noside .side-head span,body.noside nav{display:none}}
 .row{display:flex;align-items:center}.fold,.leaf{flex:none;width:20px}
 .fold{background:none;border:0;padding:0;color:var(--mute);cursor:pointer;line-height:1;transition:transform .15s}
 .fold:hover{color:var(--c3)}li.open>.row>.fold{transform:rotate(90deg)}nav li>ul{display:none}nav li.open>ul{display:block}
@@ -987,7 +1023,7 @@ border-top:4px solid var(--c);color:var(--fg);text-decoration:none;box-shadow:0 
 .hit b{color:var(--c3)}.hit small{color:var(--c1);display:block}
 @media (max-width:760px){header{flex-wrap:wrap}#q{order:2;flex-basis:100%}.out{margin-left:auto}#scope{order:3;max-width:100%}
 main{grid-template-columns:1fr;height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}
-#side{display:none}#toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
+.side-head{display:none}#toggle{display:block;width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line)}
 nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
 /* editor: the page source and the files in its folder */
 #edit{flex:1;display:flex;flex-direction:column;gap:8px;padding:4px 16px 16px;min-height:0}#edit[hidden]{display:none}
@@ -1069,7 +1105,8 @@ function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'
   const ed=n&&n.page?[mk('a',{className:'edl',href:'#'+p,textContent:editing?'👁 View':'✎ Edit',
     title:'Edit the page source and see the files in its folder',onclick:e=>{e.preventDefault();editing?closeEdit():openEdit(p)}})]:[];
   if(n)out.push(mk('span',{className:'exps'},...ed,ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
-  $('#crumb').replaceChildren(...out)}
+  $('#crumb').replaceChildren(...out);
+  document.title=(p?(n&&n.title||parts[parts.length-1])+' · ':'')+'qillqa'}
 // editor: raw index.md/html (saved with its version: 409 if the MCP or another tab changed it)
 let editing='',edVer='',edSaved='',edSeq=0,saving=-1;  // edSeq: a reply for an older open/save is ignored
 const dirty=()=>!!editing&&$('#ed-text').value!==edSaved;
@@ -1147,7 +1184,9 @@ async function find(){
 $('#only').onchange=()=>{scope=$('#only').checked?decodeURIComponent(location.hash.slice(1)):'';show();find()};
 $('#toggle').onclick=()=>$('nav').classList.toggle('open');
 document.body.classList.toggle('noside',load('qillqa.noside',false));
-$('#side').onclick=()=>save('qillqa.noside',document.body.classList.toggle('noside'));
+const sideUI=()=>{const off=document.body.classList.contains('noside'),t=off?'Show the pages panel':'Hide the pages panel';
+  Object.assign($('#side'),{title:t,ariaLabel:t});$('#side').setAttribute('aria-expanded',!off)};sideUI();
+$('#side').onclick=()=>{save('qillqa.noside',document.body.classList.toggle('noside'));sideUI()};
 // checklist pages post {qillqa: check|move} here; only the shown page, only its own iframe
 addEventListener('message',async e=>{
   const f=$('#page'),d=e.data,p=decodeURIComponent(location.hash.slice(1));
@@ -1171,7 +1210,7 @@ addEventListener('keydown',e=>{if(e.key==='Escape'&&!pane.hidden){settings(false
 document.querySelectorAll('[name=theme]').forEach(r=>{
   r.checked=r.value===document.documentElement.dataset.theme;
   r.onchange=()=>{document.cookie='qillqa_theme='+r.value+';path=/;max-age=31536000;samesite=lax';
-    document.documentElement.dataset.theme=r.value;
+    document.documentElement.dataset.theme=r.value;$('meta[name=theme-color]').content=getComputedStyle(document.documentElement).getPropertyValue('--card').trim();
     const p=decodeURIComponent(location.hash.slice(1));
     if(!$('#page').hidden)$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now()}});
 // header auto-hide (desktop, on by default): it stays while the mouse is on it or it is in use
