@@ -4,3 +4,4 @@ var/
 __pycache__/
 pages/
 progress.md
+.claude/worktrees/
