@@ -67,6 +67,7 @@ try:
         pg.goto(base + "/login")
         pg.fill("input[name=token]", "browser-tok")
         pg.click("button")
+        pg.evaluate("localStorage.setItem('qillqa.edmode','text')")  # these checks drive the text editor
         # header auto-hide (default on): seen at load, gone while reading, back from the strip at the top or '/'
         pg.goto(base + "/#plan")
         pg.mouse.move(600, 500, steps=15)

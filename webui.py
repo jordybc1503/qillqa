@@ -403,7 +403,8 @@ def api_source(path: str = ""):
     except (ValueError, OSError) as e:  # OSError: moved or deleted while we read
         _bad(e)
     return {"path": _rel(d), "format": idx.suffix[1:], "content": text.replace("\r\n", "\n"),
-            "version": _version(text), "readonly": readonly, "files": files}
+            "version": _version(text), "readonly": readonly, "files": files,
+            "base": signed_url(_rel(d))}  # the visual editor shows the folder's images through it
 
 
 @app.post("/api/source")
@@ -851,6 +852,8 @@ def signed_file(sig: str, rest: str, req: Request):
                          f"{_MD_LIVE_SANDBOX}; script-src 'nonce-{nonce}'")
         else:
             body, csp = _render_md(_title(target), text, theme=_theme(req)), _MD_SANDBOX
+        if idx.suffix == ".md" and (target / "page.css").is_file():  # a page may style its own reading view
+            body = body.replace("</head>", '<link rel="stylesheet" href="page.css"></head>', 1)
         return Response(body, media_type="text/html; charset=utf-8",
                         headers={**_SAFE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": csp})
     if not target.is_file():
@@ -954,7 +957,8 @@ INDEX = """
 <section><div id="results" hidden></div><div id="crumb"></div>
 <iframe id="page" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-top-navigation-by-user-activation allow-downloads" allow="fullscreen" title="page"></iframe>
 <div id="edit" hidden><div class="ed-bar"><b id="ed-name"></b><small id="ed-msg"></small>
-<button id="ed-cancel" type="button" class="ghost">Close</button><button id="ed-save" type="button">Save</button></div>
+<button id="ed-mode" type="button" class="ghost" hidden></button><button id="ed-cancel" type="button" class="ghost">Close</button><button id="ed-save" type="button">Save</button></div>
+<div id="ed-visual" hidden></div>
 <textarea id="ed-text" spellcheck="false" aria-label="Page source"></textarea>
 <details id="ed-files" open><summary>Files in this page</summary><ul id="ed-list"></ul></details></div>
 <div id="cards" hidden><div class="cards-head"><h2 id="cards-title"></h2><label>Sort <select id="sort"><option value="date">Last changed</option><option value="name">Name</option></select></label></div><div id="cards-body"></div></div></section></main>
@@ -1031,6 +1035,9 @@ nav{display:none}nav.open{display:block}iframe{height:75vh;flex:none}}
 .ed-bar small.bad{color:var(--c2)}.ed-bar button{padding:6px 14px}button.ghost{background:var(--card);color:var(--fg);border:1px solid var(--line)}
 #ed-text{flex:1;min-height:40vh;width:100%;resize:vertical;padding:12px 14px;border:1px solid var(--line);border-radius:10px;
 background:var(--card);color:var(--fg);font:14px/1.55 ui-monospace,monospace;tab-size:2}#ed-text:focus{outline:2px solid var(--c3)}
+#ed-text[hidden]{display:none}#ed-visual{flex:1;min-height:40vh;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fff;color:#222}
+#ed-visual[hidden]{display:none}#ed-visual .milkdown{--crepe-color-background:#fff}#ed-visual .ProseMirror{padding:20px 56px;max-width:820px;margin:0 auto}
+#ed-visual img{max-width:100%;border-radius:8px}@media(max-width:600px){#ed-visual .ProseMirror{padding:14px 18px}}
 #ed-files{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px;max-height:30vh;overflow:auto}
 #ed-files summary{cursor:pointer;font-weight:600;color:var(--c1)}#ed-list{list-style:none;margin:6px 0 0;padding:0}
 #ed-list li{display:flex;gap:12px;padding:4px 0;border-top:1px solid var(--line)}#ed-list a{flex:1;overflow-wrap:anywhere}
@@ -1107,9 +1114,48 @@ function crumb(p){const parts=p?p.split('/'):[],out=parts.length?[mk('a',{href:'
   if(n)out.push(mk('span',{className:'exps'},...ed,ex('⤓ Export',0),...(n.page&&below(n)?[ex('⤓ + subpages',1)]:[])));
   $('#crumb').replaceChildren(...out);
   document.title=(p?(n&&n.title||parts[parts.length-1])+' · ':'')+'qillqa'}
+// visual editor (md pages only): Crepe, loaded on first use. A page opens in it only if
+// Crepe gives back exactly its markdown; otherwise (tables, checklists, raw html...) it
+// stays in the text editor, so opening and saving never rewrites what you did not touch.
+// Images show through the folder's signed URL, which is stripped again before saving.
+const CREPE='https://esm.sh/@milkdown/crepe@7.22.3?bundle',
+  CREPE_CSS=['https://cdn.jsdelivr.net/npm/@milkdown/crepe@7.22.3/lib/theme/common/style.css',
+             'https://cdn.jsdelivr.net/npm/@milkdown/crepe@7.22.3/lib/theme/frame/style.css'];
+let crepe=null,visual=false,edBase='',crepeMod=null;
+const norm=s=>s.replace(/\\r\\n/g,'\\n').replace(/\\n+$/,'');
+const relImg=/(!\\[[^\\]\\n]*\\]\\()(?![a-z][a-z0-9+.-]*:|\\/|#)/gi;  // ![x](img/a.jpg): relative image
+// Crepe writes a hard break as "\\"+newline; python-markdown wants two spaces. No display URL is ever saved.
+const fromVisual=md=>md.replace(/\\\\\\n/g,'  \\n').replace(/\\u00a0/g,' ').split(edBase).join('');
+const withEnd=s=>norm(s)+(edSaved.endsWith('\\n')?'\\n':'');
+const edText=()=>visual&&crepe?withEnd(fromVisual(crepe.getMarkdown())):$('#ed-text').value;
+async function loadCrepe(){
+  if(!crepeMod){
+    for(const href of CREPE_CSS)document.head.append(mk('link',{rel:'stylesheet',href}));
+    crepeMod=await import(CREPE)}
+  return crepeMod.Crepe}
+function dropVisual(){if(crepe){crepe.destroy();crepe=null}visual=false;
+  $('#ed-visual').hidden=true;$('#ed-visual').replaceChildren();$('#ed-text').hidden=false;$('#ed-mode').textContent='✍ Visual'}
+async function toVisual(my=edSeq){
+  const src=$('#ed-text').value;edMsg('Opening the visual editor…');
+  let C;try{C=await loadCrepe()}catch(e){if(my===edSeq)edMsg('⚠ Visual editor unavailable ('+e.message+'): text mode.',1);return}
+  if(my!==edSeq)return;
+  const F=C.Feature,box=mk('div');$('#ed-visual').replaceChildren(box);
+  const c=new C({root:box,defaultValue:edBase?src.replace(relImg,'$1'+edBase):src,
+    features:{[F.ImageBlock]:false,[F.Table]:false,[F.Latex]:false,[F.CodeMirror]:false},
+    // no strikethrough button: the page view (python-markdown) would show the ~~ marks
+    featureConfigs:{[F.Toolbar]:{buildToolbar:b=>{for(const g of b.build()){const it=b.getGroup(g.key).group.items;
+      for(let i=it.length-1;i>=0;i--)if(/strike/i.test(it[i].key))it.splice(i,1)}}}}});
+  await c.create();
+  if(my!==edSeq||$('#ed-text').value!==src){c.destroy();$('#ed-visual').replaceChildren();if(my===edSeq)edMsg('');return}  // typed meanwhile: keep it
+  if(norm(fromVisual(c.getMarkdown()))!==norm(src)){  // it would change the page: keep the text editor
+    c.destroy();$('#ed-visual').replaceChildren();
+    edMsg('This page has formatting the visual editor would change: text mode.');return}
+  crepe=c;visual=true;$('#ed-text').hidden=true;$('#ed-visual').hidden=false;$('#ed-mode').textContent='⌨ Text';
+  localStorage.setItem('qillqa.edmode','visual');edMsg('')}
+function toText(){const t=edText();dropVisual();$('#ed-text').value=t;localStorage.setItem('qillqa.edmode','text');edMsg('')}
 // editor: raw index.md/html (saved with its version: 409 if the MCP or another tab changed it)
 let editing='',edVer='',edSaved='',edSeq=0,saving=-1;  // edSeq: a reply for an older open/save is ignored
-const dirty=()=>!!editing&&$('#ed-text').value!==edSaved;
+const dirty=()=>!!editing&&edText()!==edSaved;
 const size=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
 const edMsg=(t,bad)=>{$('#ed-msg').textContent=t;$('#ed-msg').classList.toggle('bad',!!bad)};
 const here=()=>decodeURIComponent(location.hash.slice(1));
@@ -1127,14 +1173,16 @@ async function openEdit(p){
     mk('small',{textContent:size(f.size)+' · '+when(f.mtime),title:new Date(f.mtime*1000).toLocaleString()}))):
     [mk('li',{className:'none',textContent:'No files: only the page itself.'})]));
   $('#ed-files summary').textContent='Files in this page ('+d.files.length+')';
-  $('#page').hidden=true;$('#edit').hidden=false;crumb(p);t.setSelectionRange(0,0);t.focus();t.scrollTop=0}
+  $('#page').hidden=true;$('#edit').hidden=false;crumb(p);t.setSelectionRange(0,0);t.focus();t.scrollTop=0;
+  edBase=d.base||'';dropVisual();$('#ed-mode').hidden=d.format!=='md'||!!d.readonly;
+  if(!$('#ed-mode').hidden&&localStorage.getItem('qillqa.edmode')!=='text')await toVisual(my)}
 function closeEdit(force){
   if(!force&&dirty()&&!confirm('Discard your unsaved changes?'))return false;
-  const p=editing;editing='';edSeq++;$('#edit').hidden=true;
+  const p=editing;editing='';edSeq++;dropVisual();$('#edit').hidden=true;
   if(p&&p===here()){$('#page').hidden=false;$('#page').src='/view?path='+encodeURIComponent(p)+'&r='+Date.now();crumb(p)}
   return true}
 async function saveEdit(){
-  const p=editing,text=$('#ed-text').value,my=edSeq;if(!p||saving===my||$('#ed-save').disabled)return;
+  const p=editing,text=edText(),my=edSeq;if(!p||saving===my||$('#ed-save').disabled)return;
   saving=my;edMsg('Saving…');  // one save in flight per editor session
   try{
     const r=await fetch('/api/source',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1148,7 +1196,8 @@ async function saveEdit(){
   }catch(e){if(my===edSeq)edMsg('⚠ Not saved: '+e.message,1)}
   finally{if(saving===my)saving=-1}}
 $('#ed-save').onclick=saveEdit;$('#ed-cancel').onclick=()=>closeEdit();
-$('#ed-text').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveEdit()}});
+for(const el of ['#ed-text','#ed-visual'])$(el).addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveEdit()}});
+$('#ed-mode').onclick=()=>visual?toText():toVisual();
 addEventListener('beforeunload',e=>{if(dirty())e.preventDefault()});
 let scope='';
 async function show(){
